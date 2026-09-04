@@ -39,6 +39,17 @@ RUN npm install -g "@anthropic-ai/claude-code@${CC_VERSION}" \
 # picks up the current version.
 ENV PATH="/opt/cc-tools:/opt/cc-local:${PATH}"
 
+# ENV PATH alone is not enough: Debian's /etc/profile assigns PATH
+# unconditionally, so any LOGIN shell (bash -l, and anything that spawns one)
+# drops both directories and the tools silently stop resolving. This puts them
+# back, guarded so repeated sourcing cannot duplicate the entries.
+RUN printf '%s\n' \
+      'case ":${PATH}:" in' \
+      '  *:/opt/cc-tools:*) ;;' \
+      '  *) PATH="/opt/cc-tools:/opt/cc-local:${PATH}"; export PATH ;;' \
+      'esac' \
+      > /etc/profile.d/cc-path.sh
+
 # Runs as root on purpose: apple/container surfaces bind-mounted host files as
 # root:root with no uid mapping, so a non-root user may not be able to write
 # /workspace. IS_SANDBOX=1 is what lets Claude Code accept
