@@ -1,0 +1,10 @@
+#!/bin/sh
+# Default entrypoint for container Claude Code sessions.
+#
+# Applies the declarative MCP server list (see cc-mcp-sync) before handing off
+# to claude, so a session started with `ccrun` picks up mcp-servers.json edits
+# without a rebuild. A sync failure is fatal: starting a session that silently
+# lacks its MCP servers is worse than not starting.
+set -e
+/opt/cc-tools/cc-mcp-sync
+exec claude "$@"

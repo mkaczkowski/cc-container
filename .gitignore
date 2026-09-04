@@ -1,0 +1,9 @@
+# Local, user-specific, or secret-bearing files never belong in the repo.
+# The runtime reads all of these from ~/.config/cc-container/ instead.
+config.sh
+mcp.env
+mcp-servers.json
+*.local.*
+.DS_Store
+__pycache__/
+*.pyc

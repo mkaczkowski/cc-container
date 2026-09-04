@@ -1,0 +1,44 @@
+name: ci
+on: [push, pull_request]
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Shell syntax (bash and zsh; the library is sourced from both)
+        run: |
+          sudo apt-get update && sudo apt-get install -y zsh shellcheck
+          bash -n bin/cc-container.sh install.sh
+          zsh -n bin/cc-container.sh
+          shellcheck -s bash -S warning bin/cc-container.sh install.sh
+
+      - name: Python
+        run: python3 -m py_compile guest/cc-mcp-sync
+
+      - name: JSON
+        run: |
+          python3 - <<'PY'
+          import glob, json, sys
+          bad = []
+          for f in glob.glob("**/*.json", recursive=True):
+              try:
+                  json.load(open(f))
+              except Exception as exc:
+                  bad.append(f"{f}: {exc}")
+          print("\n".join(bad) or "all JSON valid")
+          sys.exit(1 if bad else 0)
+          PY
+
+      - name: No personal paths or secrets in tracked files
+        run: |
+          if git grep -nE '/Users/[a-z]' -- . ':!*.md' ':!.github/workflows/ci.yml'; then
+            echo "::error::a hardcoded /Users/<name> path reached a tracked file"
+            exit 1
+          fi
+          if git ls-files | grep -qE '(^|/)(mcp\.env|config\.sh)$'; then
+            echo "::error::a user config file is tracked; it belongs in ~/.config"
+            exit 1
+          fi
+          echo "clean"

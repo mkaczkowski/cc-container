@@ -1,0 +1,18 @@
+{
+  "//": "Declarative MCP servers for the container. Copy to",
+  "//1": "~/.config/cc-container/mcp/mcp-servers.json. It is synced into the",
+  "//2": "guest's USER scope at every session start, so `claude mcp list` and",
+  "//3": "/mcp see the servers normally. Secrets go in mcp.env as ${VAR}",
+  "//4": "placeholders, never inline here. A server whose command is not on the",
+  "//5": "guest PATH must be installed in image/Dockerfile (then cc-container-build);",
+  "//6": "npx -y also works but re-downloads on every server start.",
+  "//7": "Node's global fetch ignores http_proxy: if you use the host proxy, add",
+  "//8": "\"env\": {\"NODE_USE_ENV_PROXY\": \"1\"} to any server built on bare fetch.",
+  "mcpServers": {
+    "context7": {
+      "type": "stdio",
+      "command": "context7-mcp",
+      "args": ["--api-key", "${CONTEXT7_API_KEY}"]
+    }
+  }
+}

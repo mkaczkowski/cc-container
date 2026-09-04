@@ -1,0 +1,118 @@
+#!/usr/bin/env python3
+"""Sync the container's declarative MCP server list into Claude Code's user scope.
+
+The host directory ~/.config/cc-container/mcp/ is mounted read-only at /opt/cc-mcp
+(a directory, so an editor's atomic save on the host is picked up rather than
+unmounting the file). Its mcp-servers.json `mcpServers` object is merged into the
+top-level `mcpServers` of /root/.claude.json, which is what `claude mcp add
+--scope user` writes and what `claude mcp list` / /mcp read. Merging (rather
+than passing --mcp-config) keeps those commands working and leaves project
+scope (.mcp.json) untouched.
+
+Servers this script owns are recorded in a sidecar so that deleting one from
+mcp-servers.json also removes it from the user scope, while servers added by
+hand with `claude mcp add` are never touched.
+
+${VAR} placeholders in string values are expanded from the environment; a
+missing variable is a hard error, not a silently empty key.
+
+A missing /opt/cc-mcp is treated as "no MCP volume mounted", which is the normal
+state for a container started outside cc-container.sh. That is the one silent
+no-op here, and it is why the mount must be a directory: a single-file mount that
+vanished on edit would be indistinguishable from it.
+"""
+
+import json
+import os
+import re
+import sys
+import tempfile
+
+CONFIG = "/opt/cc-mcp/mcp-servers.json"
+CLAUDE_JSON = os.path.expanduser("~/.claude.json")
+MANAGED = os.path.expanduser("~/.cc-mcp-managed.json")
+PLACEHOLDER = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
+
+
+def fail(msg):
+    print(f"cc-mcp-sync: {msg}", file=sys.stderr)
+    sys.exit(1)
+
+
+def expand(value, where):
+    """Recursively expand ${VAR} in strings, erroring on anything undefined."""
+    if isinstance(value, str):
+        missing = [m for m in PLACEHOLDER.findall(value) if m not in os.environ]
+        if missing:
+            fail(
+                f"{where}: undefined variable(s) {', '.join(missing)}. "
+                f"Add them to ~/.config/cc-container/mcp.env on the Mac and restart "
+                f"the container (cc-down && cc-up)."
+            )
+        return PLACEHOLDER.sub(lambda m: os.environ[m.group(1)], value)
+    if isinstance(value, dict):
+        return {k: expand(v, f"{where}.{k}") for k, v in value.items()}
+    if isinstance(value, list):
+        return [expand(v, f"{where}[{i}]") for i, v in enumerate(value)]
+    return value
+
+
+def read_json(path, default):
+    if not os.path.exists(path):
+        return default
+    try:
+        with open(path) as fh:
+            return json.load(fh)
+    except (json.JSONDecodeError, OSError) as exc:
+        fail(f"cannot read {path}: {exc}")
+
+
+def write_json_atomic(path, data):
+    directory = os.path.dirname(path) or "."
+    fd, tmp = tempfile.mkstemp(dir=directory, prefix=".cc-mcp-sync.")
+    try:
+        with os.fdopen(fd, "w") as fh:
+            json.dump(data, fh, indent=2)
+        os.replace(tmp, path)
+    except OSError as exc:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+        fail(f"cannot write {path}: {exc}")
+
+
+def main():
+    if not os.path.exists(CONFIG):
+        # No mount, no managed servers: nothing to do. This is the expected
+        # state for a container started without the MCP volume.
+        return
+
+    config = read_json(CONFIG, {})
+    desired = config.get("mcpServers")
+    if desired is None:
+        fail(f"{CONFIG} has no 'mcpServers' object")
+    if not isinstance(desired, dict):
+        fail(f"{CONFIG}: 'mcpServers' must be an object, got {type(desired).__name__}")
+    desired = {name: expand(spec, name) for name, spec in desired.items()}
+
+    claude = read_json(CLAUDE_JSON, {})
+    servers = claude.setdefault("mcpServers", {})
+    previously_managed = read_json(MANAGED, [])
+
+    # Drop servers we added on an earlier run that are no longer declared, so
+    # removing an entry from mcp-servers.json actually removes it.
+    for stale in set(previously_managed) - set(desired):
+        servers.pop(stale, None)
+
+    changed = servers != {**servers, **desired} or set(previously_managed) != set(desired)
+    servers.update(desired)
+
+    if changed:
+        write_json_atomic(CLAUDE_JSON, claude)
+    write_json_atomic(MANAGED, sorted(desired))
+
+    if changed and sys.stdout.isatty():
+        print(f"cc-mcp-sync: {', '.join(sorted(desired)) or 'none'}")
+
+
+if __name__ == "__main__":
+    main()
