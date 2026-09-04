@@ -22,6 +22,12 @@ First public release.
   moved out of `/tmp` into `~/.local/state/cc-container/`.
 - Container lookups parse JSON instead of prefix-matching `container list`.
 - `install.sh` / `install.sh --uninstall`.
+- Corrected several claims that turned out to be wrong when checked against a
+  real setup: the install command (`brew install container`, a formula not a
+  cask), the disk a long-lived session occupies, the cold-start figure, and the
+  fact that `ccrun`/`ccsh` cannot run while a shared session holds the volume.
+- Troubleshooting for the two failure modes a full disk actually produces: the
+  build erroring on space, and buildkit wedging read-only afterwards.
 - `cc-update`: pull the repo, then do the parts a pull cannot -- rebuild when
   image inputs changed, report new config settings, and say when a running
   session needs recycling.

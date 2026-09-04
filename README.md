@@ -17,8 +17,10 @@ likes, and the only host state it can touch is the directory you mounted.
 
 Devcontainers get you most of that. What is different here:
 
-- **`apple/container` gives each session its own real VM**, not a namespace on a
-  shared Docker daemon — no Docker Desktop, no licence, no daemon to share.
+- **`apple/container` gives each session its own real VM**, not a namespace
+  beside every other container on a shared kernel — and no Docker Desktop and no
+  licence. (There is still a lightweight system service, started with
+  `container system start`; what you do not share is the kernel.)
 - **Several agents, one container.** A shared session takes ~0.1 s to attach, so
   running four Claude Code instances across four terminals against one repo is
   the normal mode rather than a heavyweight one.
@@ -28,7 +30,9 @@ Devcontainers get you most of that. What is different here:
 ## Requirements
 
 - Apple silicon, macOS 15+ (26 recommended)
-- [`apple/container`](https://github.com/apple/container) 1.2.0+ (`brew install --cask container`)
+- [`apple/container`](https://github.com/apple/container) 1.2.0 or newer
+  (`brew install container`) — developed and tested against 1.2.0; the CLI is
+  young and its flags move, so report breakage on newer releases
 - `jq`, `python3` (both standard or one `brew install` away)
 
 ## Install
@@ -102,13 +106,22 @@ ccdown                        # when finished
 You cannot simply run `ccrun` twice: only one container can hold the `cc-home`
 volume at a time, and a second parallel run fails with
 `storage device attachment is invalid`. That constraint is why this mode exists.
-Attaching takes ~0.1 s against ~1.4 s for a cold `ccrun`.
+Attaching takes ~0.1 s. A cold `ccrun` boots a VM first — about 1.2 s before
+Claude Code itself starts, measured on an M-series Mac.
 
 **Caveats.** Sessions share one filesystem and one `~/.claude`: conversations are
 independent, but two agents editing the same file will overwrite each other.
 Every session sees the directory you ran `ccup` from, not your shell's cwd.
-State accumulates until `ccdown` (~2.8 GB of disk while it exists), which costs
-the clean-slate guarantee `--rm` gives you.
+State accumulates until `ccdown`, which costs the clean-slate guarantee `--rm`
+gives you — and it is not a small amount: a session left up through a day of
+real work reclaimed 13 GB when torn down. Expect the container runtime's storage
+to grow steadily, and `ccdown` when you are finished rather than leaving a
+session up indefinitely.
+
+**`ccrun` and `ccsh` do not work while a shared session is up**, for the same
+reason: they want the `cc-home` volume the session is holding, and fail with
+`storage device attachment is invalid`. Use `ccx` / `ccxs` instead, or `ccdown`
+first.
 
 Switching projects means recycling: `ccdown && cd <other> && ccup`.
 
@@ -229,6 +242,10 @@ RUN npm install -g @upstash/context7-mcp@4
 Its build context is the config directory, so it can `COPY` files from there.
 This survives `cc-update` untouched: the repo never sees it.
 
+The cost is that you now store two images, `<name>:base` and `<name>:local`.
+Delete the base with `container image delete claude-code:base` if you need the
+space; the next `cc-container-build` recreates it.
+
 ## Upgrading Claude Code
 
 ```bash
@@ -278,7 +295,8 @@ does not follow that, and the guest stops seeing the file at all — silently.
 - **Only the mounted directory is visible.** Cross-repo work needs an explicit
   extra mount, and a running `ccup` session only picks up a newly added one after
   `ccdown && ccup`.
-- **Slower startup.** Each `ccrun` boots a VM: a few seconds.
+- **Slower startup.** Each `ccrun` boots a VM (~1.2 s) before Claude Code
+  starts. `ccx` against a running session is ~0.1 s.
 - **Some hosts have no guest network egress at all** (endpoint-security packet
   filters). `cc-doctor` detects it and enables a host proxy;
   see [docs/NETWORK.md](docs/NETWORK.md).
@@ -290,9 +308,30 @@ cc-doctor                                # start here
 container system status                  # runtime up?
 container image list | grep claude       # image present?
 container system logs | tail -30         # runtime errors
-cc-shell                                 # poke around inside
+ccxs                                     # poke around inside a running session
+cc-shell                                 # ...or a throwaway one, if none is up
 tail -f ~/.local/state/cc-container/*.log
 ```
+
+**A build fails with `no space left on device`.** The runtime's storage grows
+with every image and every container's scratch. `ccdown` reclaims the running
+session's share, which is usually the largest single piece. Deleting the base
+image (above) is the next lever.
+
+**A build fails with `read-only file system` or `input/output error`, and keeps
+failing after you free space.** The buildkit helper container wedges when it
+runs out of disk mid-build and does not recover on its own:
+
+```bash
+container system stop && container system start
+container delete buildkit                # recreated on the next build
+```
+
+**A tool in `/opt/cc-local` reports `command not found`.** Check whether the
+directory is mounted at all (`ccxs -c 'ls /opt/cc-local'`) before suspecting
+`PATH`: an entry missing from `CC_EXTRA_VOLUME_ARGS` looks identical, from
+inside, to a `PATH` problem. Note that a mount added to `config.sh` only reaches
+a running session after `ccdown && ccup`.
 
 ## Licence
 

@@ -190,10 +190,13 @@ cc-proxy-up() {
   tinyproxy -d -c "${CC_CONFIG_DIR}/tinyproxy.conf" \
     >"${CC_STATE_DIR}/tinyproxy.log" 2>&1 &
   echo "$!" > "${CC_PROXY_PID_FILE}"
-  local i
-  for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+  # Poll rather than sleeping a flat interval: it is usually ready well inside
+  # the first tick, and a fixed sleep would tax every container start.
+  local waited=0
+  while [ "${waited}" -lt 20 ]; do
     _cc_listening "${CC_PROXY_PORT}" && return 0
     sleep 0.2
+    waited=$((waited + 1))
   done
   echo "cc-container: proxy failed to start on port ${CC_PROXY_PORT}; see ${CC_STATE_DIR}/tinyproxy.log" >&2
   return 1
@@ -433,7 +436,7 @@ cc-doctor() {
   if command -v container >/dev/null 2>&1; then
     _p "container cli" "$(container --version 2>&1 | head -1)"
   else
-    _p "container cli" "FAIL not installed - brew install --cask container"; ok=1
+    _p "container cli" "FAIL not installed - brew install container"; ok=1
   fi
   if container system status >/dev/null 2>&1; then
     _p "runtime" "running"

@@ -67,7 +67,7 @@ cat <<TXT
 
 Next:
   1. Prerequisites (Apple silicon, macOS 15+):
-       brew install --cask container && container system start
+       brew install container && container system start
   2. Open a new terminal (or: source ${RC})
   3. cc-container-build      # build the image (a few minutes)
   4. cc-doctor               # check prerequisites and probe guest egress
