@@ -22,3 +22,8 @@ First public release.
   moved out of `/tmp` into `~/.local/state/cc-container/`.
 - Container lookups parse JSON instead of prefix-matching `container list`.
 - `install.sh` / `install.sh --uninstall`.
+- `cc-update`: pull the repo, then do the parts a pull cannot -- rebuild when
+  image inputs changed, report new config settings, and say when a running
+  session needs recycling.
+- Optional `~/.config/cc-container/Dockerfile.local`, built on top of the repo
+  image, so adding tools never means forking the Dockerfile.

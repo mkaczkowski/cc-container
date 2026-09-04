@@ -59,6 +59,7 @@ volume, so later runs start authenticated.
 | `cc-container` | `ccrun` | One-off throwaway session (`--rm`) |
 | `cc-shell` | `ccsh` | One-off throwaway bash shell |
 | `cc-doctor` | — | Check every prerequisite; record the egress verdict |
+| `cc-update` | `ccupd` | Pull the repo and apply what the pull cannot |
 | `cc-container-upgrade` | — | Upgrade Claude Code in the image |
 | `cc-container-build` | — | Rebuild the image |
 
@@ -184,6 +185,42 @@ Guest → host TCP works (that is also how the optional proxy works), so a small
 host-side listener on the bridge address is the general shape of an escape hatch
 for host-only tooling. If you build one, read [SECURITY.md](SECURITY.md) first:
 anything the guest can ask the host to run is outside the VM boundary.
+
+## Staying up to date
+
+The shell library, the guest tools and the Dockerfile are all read from the repo
+working tree at run time, so `git pull` is most of the update — a new shell picks
+up new behaviour, and guest tools are live on the next session. Two things a pull
+cannot do for you: rebuild the image when the Dockerfile changed, and set a
+config key that did not exist before.
+
+```bash
+cc-update          # pull, then report and apply exactly what is needed
+```
+
+It refuses to run with uncommitted changes in the repo, lists the commits and
+files that moved, rebuilds the image if anything under `image/` changed, names
+any new config setting your `config.sh` does not mention, and tells you when a
+running session needs recycling.
+
+## Adding tools to the image
+
+Do not fork the Dockerfile. If `~/.config/cc-container/Dockerfile.local` exists,
+`cc-container-build` builds the repo image as `claude-code:base` and yours on top
+of it:
+
+```dockerfile
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+
+# MCP server packages, so a stdio server does not resolve `npx -y` per start
+RUN npm install -g @upstash/context7-mcp@4
+
+# ...or another runtime, a headless browser, your own CLI
+```
+
+Its build context is the config directory, so it can `COPY` files from there.
+This survives `cc-update` untouched: the repo never sees it.
 
 ## Upgrading Claude Code
 

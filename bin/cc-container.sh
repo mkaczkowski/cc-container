@@ -483,6 +483,20 @@ cc-doctor() {
 # ---------------------------------------------------------------------------
 # Image build / upgrade
 # ---------------------------------------------------------------------------
+# Build the image. Pass a Claude Code version to pin it, e.g.
+#   cc-container-build 2.1.220
+#
+# If ~/.config/cc-container/Dockerfile.local exists, the repo image is built as
+# <name>:base and your file is built on top of it as the real image. That is the
+# supported way to add tools (extra MCP server packages, another runtime, a
+# headless browser) without forking the repo's Dockerfile and without this
+# project needing a flag per use case. Start it with:
+#
+#   ARG BASE_IMAGE
+#   FROM ${BASE_IMAGE}
+#   RUN npm install -g @some/mcp-server
+#
+# Its build context is the config directory, so it can COPY files from there.
 cc-container-build() {
   cc-runtime-up || return 1
   _cc_proxy_collect || return 1
@@ -492,9 +506,90 @@ cc-container-build() {
     args+=(--build-arg "http_proxy=${CC_PROXY_URL}" --build-arg "https_proxy=${CC_PROXY_URL}"
            --build-arg "HTTP_PROXY=${CC_PROXY_URL}" --build-arg "HTTPS_PROXY=${CC_PROXY_URL}")
   fi
+  local overlay="${CC_CONFIG_DIR}/Dockerfile.local"
+  if [ ! -r "${overlay}" ]; then
+    container build ${args+"${args[@]}"} \
+      -t "${CC_CONTAINER_IMAGE}" "${CC_CONTAINER_REPO}/image"
+    return
+  fi
+  local base="${CC_CONTAINER_IMAGE%%:*}:base"
+  echo "Building ${base} from the repo Dockerfile..."
   container build ${args+"${args[@]}"} \
-    -t "${CC_CONTAINER_IMAGE}" "${CC_CONTAINER_REPO}/image"
+    -t "${base}" "${CC_CONTAINER_REPO}/image" || return 1
+  echo "Applying ${overlay} on top, as ${CC_CONTAINER_IMAGE}..."
+  container build ${args+"${args[@]}"} --build-arg "BASE_IMAGE=${base}" \
+    -f "${overlay}" -t "${CC_CONTAINER_IMAGE}" "${CC_CONFIG_DIR}"
 }
+
+# ---------------------------------------------------------------------------
+# Staying in sync with the repo
+#
+# The shell library, the guest scripts and the Dockerfile are all read from the
+# repo working tree at run time, so `git pull` is the whole update for most
+# changes -- a new shell means new behaviour. The two that need a follow-up are
+# a changed Dockerfile (rebuild) and a new config key (nothing reads it until
+# you add it). cc-update does the pull and tells you which applies.
+# ---------------------------------------------------------------------------
+_cc_repo_git() { git -C "${CC_CONTAINER_REPO}" "$@"; }
+
+# Config keys the examples define that the user's own config never mentions.
+# Purely informational: a missing key just means the built-in default applies.
+_cc_config_drift() {
+  local example="${CC_CONTAINER_REPO}/config/config.example.sh"
+  local mine="${CC_CONFIG_DIR}/config.sh"
+  [ -r "${example}" ] && [ -r "${mine}" ] || return 0
+  local key missing=""
+  for key in $(grep -oE '^# *(CC_[A-Z_]+)=' "${example}" | tr -d '# =' | sort -u); do
+    grep -qE "^[[:space:]]*(export )?${key}=" "${mine}" || missing="${missing} ${key}"
+  done
+  [ -n "${missing}" ] && echo "  new settings available (defaults apply until set):${missing}"
+  return 0
+}
+
+cc-update() {
+  if ! _cc_repo_git rev-parse --git-dir >/dev/null 2>&1; then
+    echo "cc-update: ${CC_CONTAINER_REPO} is not a git checkout" >&2
+    return 1
+  fi
+  if [ -n "$(_cc_repo_git status --porcelain)" ]; then
+    echo "cc-update: ${CC_CONTAINER_REPO} has uncommitted changes; commit or stash first" >&2
+    _cc_repo_git status --short >&2
+    return 1
+  fi
+  local before after
+  before="$(_cc_repo_git rev-parse HEAD)"
+  _cc_repo_git pull --ff-only || return 1
+  after="$(_cc_repo_git rev-parse HEAD)"
+  if [ "${before}" = "${after}" ]; then
+    echo "cc-container: already up to date ($(_cc_repo_git rev-parse --short HEAD))"
+    _cc_config_drift
+    return 0
+  fi
+  echo "cc-container: ${before:0:7} -> ${after:0:7}"
+  _cc_repo_git log --oneline "${before}..${after}" | sed 's/^/  /'
+  local changed
+  changed="$(_cc_repo_git diff --name-only "${before}" "${after}")"
+  echo "${changed}" | sed 's/^/  changed: /'
+  _cc_config_drift
+  # The image is the only artefact a pull cannot update on its own.
+  if echo "${changed}" | grep -q '^image/'; then
+    echo "  image inputs changed - rebuilding"
+    cc-container-build || return 1
+    if [ "$(_cc_session_state)" = "running" ]; then
+      echo "  the running session still uses the OLD image; recycle it: ccdown && ccup"
+    fi
+  fi
+  # A changed shell library only takes effect in a new shell.
+  if echo "${changed}" | grep -q '^bin/'; then
+    echo "  shell library changed - open a new shell, or: source ${CC_CONTAINER_REPO}/bin/cc-container.sh"
+  fi
+  # Guest scripts are bind-mounted, so they are live for the next session.
+  if echo "${changed}" | grep -q '^guest/'; then
+    echo "  guest tools changed - picked up automatically on the next session"
+  fi
+}
+
+ccupd() { cc-update "$@"; }
 
 # Upgrade Claude Code in the image. A plain rebuild does NOT upgrade: the npm
 # install sits in a cached layer and replays the old version. Resolving the

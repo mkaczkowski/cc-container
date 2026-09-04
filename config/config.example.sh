@@ -35,6 +35,11 @@
 # Name of the long-lived shared container used by cc-up / cc-attach.
 # CC_SESSION_NAME=cc-session
 
+# --- adding tools to the image ----------------------------------------------
+# Put a Dockerfile.local next to this file to layer your own tools on top of the
+# repo image (see README "Adding tools to the image"). No setting is needed:
+# cc-container-build picks it up if it exists.
+
 # --- extension points --------------------------------------------------------
 # Extra `container run` arguments, applied to one-off runs and the shared
 # session alike. Use it to pass an --env your own host tooling needs.
