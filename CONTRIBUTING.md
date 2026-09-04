@@ -17,9 +17,9 @@
 ## Local checks
 
 ```bash
-bash -n bin/cc-container.sh install.sh
+bash -n bin/cc-container.sh install.sh guest/statusline.sh
 zsh -n bin/cc-container.sh                 # it is sourced from both shells
-shellcheck -s bash bin/cc-container.sh install.sh
+shellcheck -s bash bin/cc-container.sh install.sh guest/statusline.sh
 python3 -m py_compile guest/cc-mcp-sync
 python3 -c 'import json,glob; [json.load(open(f)) for f in glob.glob("**/*.json", recursive=True)]'
 ```

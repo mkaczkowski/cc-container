@@ -180,6 +180,39 @@ full.
 cannot complete login: the redirect binds a port *inside* the container that your
 host browser cannot reach. Add those on the host instead.
 
+## Statusline
+
+The container has its own `~/.claude`, in the `cc-home` volume, so its
+statusline is configured separately from the one you use on the host — and by
+default it has none. `guest/statusline.sh` ships as an optional one that makes
+it obvious at a glance which sessions are containerised:
+
+```
+⬡ container · Opus 5 · ████░░░░░░ 42% 200k · 15m · my-repo:main
+```
+
+Nothing runs it until you point Claude Code at it. From the host, with a session
+up:
+
+```bash
+ccxs -c 'f=$HOME/.claude/settings.json; [ -f "$f" ] || echo "{}" > "$f";
+  jq ".statusLine = {type: \"command\", command: \"bash /opt/cc-tools/statusline.sh\"}" \
+    "$f" > "$f.tmp" && mv "$f.tmp" "$f"'
+```
+
+It takes effect for sessions started after that; a session already running keeps
+the statusline it started with.
+
+The `⬡ container` badge keys off `IS_SANDBOX=1`, which the image sets, so the
+same script is safe to reuse on the host — there, the badge simply does not
+appear. It uses 16-colour ANSI only, so it reads correctly in any terminal theme,
+and it always prints a line: a missing field or a failed `git` call degrades that
+part rather than blanking the status.
+
+To customise it, copy it to `~/.config/cc-container/local/` (mounted at
+`/opt/cc-local`, also on the guest `PATH`) and point the command there instead.
+Updates will never overwrite it in that location.
+
 ## Extending it with your own host tooling
 
 Some tools only exist on macOS and never will in a Linux guest. Rather than

@@ -22,6 +22,8 @@ First public release.
   moved out of `/tmp` into `~/.local/state/cc-container/`.
 - Container lookups parse JSON instead of prefix-matching `container list`.
 - `install.sh` / `install.sh --uninstall`.
+- Optional `guest/statusline.sh`: a container-aware Claude Code statusline, off
+  until you point Claude Code at it.
 - Corrected several claims that turned out to be wrong when checked against a
   real setup: the install command (`brew install container`, a formula not a
   cask), the disk a long-lived session occupies, the cold-start figure, and the
