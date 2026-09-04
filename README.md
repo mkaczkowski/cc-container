@@ -156,6 +156,13 @@ list is merged into the user scope rather than passed as `--mcp-config` (that
 flag is variadic, so it swallows a bare prompt positional, and `claude mcp list`
 rejects it).
 
+**Where the secrets end up.** `mcp.env` keeps keys out of a JSON file you might
+commit or share, but the sync substitutes each `${VAR}` into the guest's
+`~/.claude.json` so that `claude mcp list` and `/mcp` work — which means the
+resolved key persists in the `cc-home` volume until you delete it. Treat that
+volume as holding credentials, and note that `claude mcp list` prints keys in
+full.
+
 **Only stdio and API-key servers work.** Servers authenticating by OAuth loopback
 cannot complete login: the redirect binds a port *inside* the container that your
 host browser cannot reach. Add those on the host instead.

@@ -73,6 +73,10 @@ direct egress.
   Never `COPY` it into the image: it can contain a live bearer token.
 - **Credentials persist.** `/login` inside the container writes to the `cc-home`
   volume and stays there until you delete the volume. Every project shares it.
+  So do MCP API keys: `mcp.env` values are substituted into the guest's
+  `~/.claude.json`, so they live in that volume in plaintext, and
+  `claude mcp list` prints them in full. `mcp.env` keeps them out of a file you
+  might commit — it does not keep them out of the container.
 - **Sessions share a filesystem.** In multi-session mode two agents editing the
   same file will overwrite each other. That is a correctness property, not a
   security one, but it surprises people.

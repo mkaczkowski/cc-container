@@ -113,8 +113,11 @@ CC_EGRESS_STATE="${CC_STATE_DIR}/egress"
 # silently no-op on every edit. A directory mount resolves the name at read time.
 #
 # mcp.env stays OUTSIDE that directory. Its KEY=VALUE lines are what the JSON
-# references as ${KEY}; they reach the guest as --env, so secrets live in the
-# process environment and never in the container filesystem or the cc-home volume.
+# references as ${KEY}, and they reach the guest as --env. Note what that does
+# and does not buy you: cc-mcp-sync substitutes the value into the guest's
+# ~/.claude.json (that is how `claude mcp list` and /mcp see the server), so the
+# resolved secret DOES persist in the cc-home volume. The point of mcp.env is
+# that the secret is not sitting in a JSON file you might commit or share.
 # ---------------------------------------------------------------------------
 _cc_mcp_args() {
   [ -r "${CC_MCP_DIR}/mcp-servers.json" ] || return 0
