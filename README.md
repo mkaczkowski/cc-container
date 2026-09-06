@@ -652,6 +652,17 @@ path does not resolve there. Create worktrees in the guest with
 `ccx --worktree <name>` and `git worktree lock` them; a host-created worktree has
 to be recreated, its files are left in place to salvage first.
 
+**A command in a worktree session is refused as `too complex to verify`.**
+Claude Code parses every Bash command to prove its git operations stay inside the
+session's worktree, and fails closed on anything it cannot reduce to a definite
+argument list: a loop body, a `$(...)` substitution, an `eval`. `gh` is checked
+too, because it shells out to git and `-R` can retarget another repo, so a
+read-only `for r in ...; do gh run view $r; done` is refused despite being
+harmless. Split it into one flat command per iteration, and move any awkwardly
+quoted argument (a `--jq` template, say) out into a separate `jq` call. The check
+is per-command, so nothing in `config.sh` or the image turns it off; only a
+session started without `--worktree` avoids it.
+
 ## Licence
 
 MIT. See [LICENSE](LICENSE).
