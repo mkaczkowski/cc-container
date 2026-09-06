@@ -2,8 +2,10 @@
 # The runtime reads all of these from ~/.config/cc-container/ instead.
 config.sh
 mcp.env
+.idea
 mcp-servers.json
 *.local.*
 .DS_Store
 __pycache__/
 *.pyc
+.claude/worktrees/

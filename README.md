@@ -110,8 +110,9 @@ Attaching takes ~0.1 s. A cold `ccrun` boots a VM first — about 1.2 s before
 Claude Code itself starts, measured on an M-series Mac.
 
 **Caveats.** Sessions share one filesystem and one `~/.claude`: conversations are
-independent, but two agents editing the same file will overwrite each other.
-Every session sees the directory you ran `ccup` from, not your shell's cwd.
+independent, but two agents editing the same file will overwrite each other
+unless you isolate them in worktrees (below). Every session sees the directory
+you ran `ccup` from, not your shell's cwd.
 State accumulates until `ccdown`, which costs the clean-slate guarantee `--rm`
 gives you — and it is not a small amount: a session left up through a day of
 real work reclaimed 13 GB when torn down. Expect the container runtime's storage
@@ -124,6 +125,283 @@ reason: they want the `cc-home` volume the session is holding, and fail with
 first.
 
 Switching projects means recycling: `ccdown && cd <other> && ccup`.
+
+### Worktrees isolate parallel sessions
+
+`--worktree` puts the worktree under `<repo root>/.claude/worktrees/<name>`,
+which is inside the mount, so it needs no extra volume and no configuration:
+
+```bash
+ccup                        # once, from the repo root
+ccx --worktree feat-auth    # terminal 1
+ccx --worktree bugfix-456   # terminal 2
+```
+
+Each session gets its own checkout on its own branch, and Claude Code blocks the
+edits, `cd`s and `git -C` redirects that would reach back into the main checkout.
+A subagent declaring `isolation: worktree` is covered the same way. This is what
+removes the file-collision caveat above; the shared `~/.claude` and the shared
+container stay shared.
+
+Workspace trust is keyed on the guest path and every project mounts at
+`/workspace`, so accepting it once covers every project you ever mount, and
+`--worktree` never stops on the trust dialog in a new repo.
+
+**The host and the guest disagree about the path.** A worktree created in the
+guest records `/workspace/.claude/worktrees/<name>`, which does not exist on the
+Mac: host git lists it as `prunable`, and `git worktree prune` then deletes its
+metadata (the files survive, the git linkage does not). It fails in reverse too,
+so a worktree created on the host is rejected in the guest with
+`Refusing to use <path> as an isolation worktree`. Keep worktree work inside the
+guest. To stop host-side git touching them:
+
+```bash
+git worktree lock .claude/worktrees/<name>
+```
+
+A locked worktree survives both an explicit `git worktree prune` and the expiry
+sweep `git gc` runs, and lists as `locked` instead of `prunable`. The cost is
+that Claude Code's own cleanup and `git worktree remove` will both refuse it
+until you `git worktree unlock` it.
+
+A worktree is a fresh checkout, which implies two more things. Add
+`.claude/worktrees/` to the project's `.gitignore`, or every worktree shows up as
+untracked in the main checkout. And none of your gitignored files are there, so
+name the ones the build needs in a `.worktreeinclude` at the project root
+(`.gitignore` syntax; only gitignored files are copied):
+
+```text
+.env
+.env.local
+```
+
+**On a large repo, check out only what you need.** A worktree is a full
+checkout, and here that write goes through the bind mount onto host disk, so a
+big repo can spend tens of seconds on it. Limit it with `worktree.sparsePaths`
+in the project's `.claude/settings.json`:
+
+```json
+{"worktree": {"sparsePaths": ["src", "packages/foo"]}}
+```
+
+That is a cone-mode sparse checkout: files at the repo root are always present,
+the listed directories are materialised, everything else is left out. Check it
+with `git sparse-checkout list` inside the worktree. It also holds down the
+host-disk growth noted below.
+
+`sparsePaths` and `.worktreeinclude` do not conflict, because they act on
+different files. `sparsePaths` chooses which **tracked** directories get checked
+out; `.worktreeinclude` copies its **gitignored** files in regardless, creating a
+parent directory if the sparse set had excluded it. Such a directory then holds
+only the copied file, not the tracked content that was excluded, and `git status`
+stays clean because the copies are gitignored either way.
+
+**Installing dependencies is where the time actually goes.** Creating the
+worktree is cheap next to populating it. A dependency tree is tens of thousands
+of small files, and writing them through the bind mount is bound by per-file
+metadata round-trips, not by data. Creating 3,000 files from a warm cache
+measured 1.9 s on the bind mount against 0.02 s on the container's own
+filesystem, and switching from a copy to a hardlink clone barely moved it
+(2.3 s to 1.9 s). Scaled to a real `node_modules` of ~105,000 files that is
+roughly a minute, paid again for every worktree.
+
+So hardlinking is a disk win, not a speed win, here. The two levers that do pay:
+
+- **Check that the store is being linked from, not copied out of.** A store on a
+  different filesystem from the checkout cannot be hardlinked from at all, though
+  package managers differ in whether they notice: pnpm relocates its store onto
+  the project's filesystem by itself, so placement is usually already right.
+  Placement is not proof, though. The fallback to copying is silent, and it
+  happens on the bind mount even with the store correctly placed. Confirm with
+  link counts, where `1` means the file was copied:
+
+  ```bash
+  find node_modules -type f | head -100 | xargs stat -c %h | sort | uniq -c
+  ```
+
+  All `1` means force it, for pnpm with `package-import-method=hardlink`. Put
+  that in the guest's `~/.npmrc`, which `cc-home` persists, and not in the
+  project's tracked `.npmrc`: that file also reaches cloud builds, and unlike the
+  default `auto`, `hardlink` has no fallback and fails where `auto` would copy.
+  Expect it to reclaim duplicated gigabytes and, per the numbers above, very
+  little time.
+- **Move the install off the bind mount entirely**, by pointing the dependency
+  directory at a path on the container filesystem. That is where the 94x lives.
+  The trade is that the directory is then invisible to the Mac, so a host-side
+  IDE loses code resolution, and it persists in `cc-home` rather than being
+  reclaimed with the checkout. Worth it for a container-only workflow, not if you
+  edit in a host IDE.
+
+**Automate it, but never synchronously.** `SessionStart` hooks block session
+initialization, so an install run directly from one presents as a hung session:
+the prompt takes input and nothing happens until the install finishes. Register
+the worker with `"async": true` so the session starts immediately, and
+`"asyncRewake": true` so a failure (exit 2) wakes Claude with the error instead
+of losing it. Pair it with a second, synchronous hook that only stats a
+directory, costs milliseconds, and tells Claude not to build yet:
+
+```json
+{
+  "hooks": {
+    "SessionStart": [
+      { "hooks": [
+        { "type": "command",
+          "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/bootstrap-notice.sh" },
+        { "type": "command",
+          "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/bootstrap-worktree.sh",
+          "async": true, "asyncRewake": true }
+      ] }
+    ]
+  }
+}
+```
+
+Hooks talk to Claude, not to you: at exit 0 stdout becomes context Claude sees,
+while stderr goes only to the debug log. So the notice hook emits
+`additionalContext` to keep Claude from running a build against an empty tree:
+
+```bash
+[ -d "${cwd}/node_modules" ] && exit 0
+jq -cn --arg d "${cwd}" '{hookSpecificOutput: {hookEventName: "SessionStart",
+  additionalContext: ("Dependencies for " + $d + " are installing in the background; "
+  + "do not run builds or tests until node_modules exists.")}}'
+```
+
+To tell *yourself*, use the statusline. The worker touches a marker file for the
+duration, and [the statusline](#statusline) renders it, so the wait is visible
+rather than looking like an idle session:
+
+```bash
+BOOT_MARKER="/tmp/cc-bootstrap/$(printf '%s' "$CWD" | sed 's|^/||; s|/|_|g')"
+[[ -f "$BOOT_MARKER" ]] && row2_parts+=("${YLW}deps installing...${RST}")
+```
+
+The worker itself stays keyed to the lockfile hash, so it is a no-op once warm,
+and adopts a pre-existing `node_modules` rather than reinstalling it:
+
+```bash
+stamp="${cwd}/node_modules/.bootstrapped"
+[ -f "${stamp}" ] && [ "$(cat "${stamp}")" = "${sum}" ] && exit 0
+# Both conditions matter: drop the stamp test and a lockfile change stops
+# triggering an install forever.
+if [ -d "${cwd}/node_modules" ] && [ ! -f "${stamp}" ]; then
+  printf '%s' "${sum}" > "${stamp}"; exit 0
+fi
+trap 'rm -f "${marker}"' EXIT INT TERM
+date > "${marker}"
+( cd "${cwd}" && pnpm install --frozen-lockfile --prefer-offline ) >"${log}" 2>&1 \
+  || { tail -20 "${log}" >&2; exit 2; }   # exit 2 + asyncRewake wakes Claude
+printf '%s' "${sum}" > "${stamp}"
+```
+
+```
+
+**On a large repo, check out only what you need.** A worktree is a full
+checkout, and here that write goes through the bind mount onto host disk, so a
+big repo can spend tens of seconds on it. Limit it with `worktree.sparsePaths`
+in the project's `.claude/settings.json`:
+
+```json
+{"worktree": {"sparsePaths": ["src", "packages/foo"]}}
+```
+
+That is a cone-mode sparse checkout: files at the repo root are always present,
+the listed directories are materialised, everything else is left out. Check it
+with `git sparse-checkout list` inside the worktree. It also holds down the
+host-disk growth noted below.
+
+`sparsePaths` and `.worktreeinclude` do not conflict, because they act on
+different files. `sparsePaths` chooses which **tracked** directories get checked
+out; `.worktreeinclude` copies its **gitignored** files in regardless, creating a
+parent directory if the sparse set had excluded it. Such a directory then holds
+only the copied file, not the tracked content that was excluded, and `git status`
+stays clean because the copies are gitignored either way.
+
+**Installing dependencies is where the time actually goes.** Creating the
+worktree is cheap next to populating it. A dependency tree is tens of thousands
+of small files, and writing them through the bind mount is bound by per-file
+metadata round-trips, not by data. Creating 3,000 files from a warm cache
+measured 1.9 s on the bind mount against 0.02 s on the container's own
+filesystem, and switching from a copy to a hardlink clone barely moved it
+(2.3 s to 1.9 s). Scaled to a real `node_modules` of ~105,000 files that is
+roughly a minute, paid again for every worktree.
+
+So hardlinking is a disk win, not a speed win, here. The two levers that do pay:
+
+- **Check that the store is being linked from, not copied out of.** A store on a
+  different filesystem from the checkout cannot be hardlinked from at all, though
+  package managers differ in whether they notice: pnpm relocates its store onto
+  the project's filesystem by itself, so placement is usually already right.
+  Placement is not proof, though. The fallback to copying is silent, and it
+  happens on the bind mount even with the store correctly placed. Confirm with
+  link counts, where `1` means the file was copied:
+
+  ```bash
+  find node_modules -type f | head -100 | xargs stat -c %h | sort | uniq -c
+  ```
+
+  All `1` means force it, for pnpm with `package-import-method=hardlink`. Put
+  that in the guest's `~/.npmrc`, which `cc-home` persists, and not in the
+  project's tracked `.npmrc`: that file also reaches cloud builds, and unlike the
+  default `auto`, `hardlink` has no fallback and fails where `auto` would copy.
+  Expect it to reclaim duplicated gigabytes and, per the numbers above, very
+  little time.
+- **Move the install off the bind mount entirely**, by pointing the dependency
+  directory at a path on the container filesystem. That is where the 94x lives.
+  The trade is that the directory is then invisible to the Mac, so a host-side
+  IDE loses code resolution, and it persists in `cc-home` rather than being
+  reclaimed with the checkout. Worth it for a container-only workflow, not if you
+  edit in a host IDE.
+
+**Automate it so it is never a manual step.** `SessionStart` fires with `cwd`
+set to the worktree root, so one idempotent script bootstraps every worktree,
+including the ones subagents create. Note the split the hooks contract makes:
+`$CLAUDE_PROJECT_DIR` stays at the main checkout, so use it to locate the script,
+and read the worktree path from the event JSON on stdin.
+
+```json
+{
+  "hooks": {
+    "SessionStart": [
+      { "hooks": [ { "type": "command",
+        "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/bootstrap-worktree.sh" } ] }
+    ]
+  }
+}
+```
+
+Keying the work to the lockfile hash makes it a no-op on every session after the
+first, so the hook costs nothing once the worktree is warm:
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+cwd="$(jq -r '.cwd // empty')"                    # the worktree, not $CLAUDE_PROJECT_DIR
+[ -n "${cwd}" ] || { echo "no .cwd in payload" >&2; exit 1; }
+lock="${cwd}/pnpm-lock.yaml"
+[ -f "${cwd}/package.json" ] && [ -f "${lock}" ] || exit 0   # not a checkout: fine
+sum="$(sha256sum "${lock}" | cut -d' ' -f1)"
+stamp="${cwd}/node_modules/.bootstrapped"
+[ -f "${stamp}" ] && [ "$(cat "${stamp}")" = "${sum}" ] && exit 0
+# A tree that predates the hook is adopted, not reinstalled. Both conditions matter:
+# drop the stamp test and a lockfile change stops triggering an install forever.
+if [ -d "${cwd}/node_modules" ] && [ ! -f "${stamp}" ]; then
+  printf '%s' "${sum}" > "${stamp}"; exit 0
+fi
+command -v pnpm >/dev/null 2>&1 || { echo "pnpm is not on PATH" >&2; exit 1; }
+( cd "${cwd}" && pnpm install --frozen-lockfile --prefer-offline ) >&2
+printf '%s' "${sum}" > "${stamp}"
+```
+
+Two smaller notes. New worktrees branch from `origin/HEAD`, so creating one
+fetches; under `CC_PROXY=on` that goes through tinyproxy with a five-second cap
+and falls back to the local `HEAD`. Set `worktree.baseRef` to `"head"` in the
+guest's `~/.claude/settings.json` to branch from your current work and skip the
+fetch. And `claude --help` advertises `--tmux`, which this image cannot satisfy:
+tmux is not installed.
+
+Worktrees also add to the disk figure above, and unlike container state they land
+on **host** disk through the bind mount, so `ccdown` does not reclaim them.
 
 ## Configuration
 
@@ -328,6 +606,10 @@ does not follow that, and the guest stops seeing the file at all — silently.
 - **Only the mounted directory is visible.** Cross-repo work needs an explicit
   extra mount, and a running `ccup` session only picks up a newly added one after
   `ccdown && ccup`.
+- **Git worktrees are guest-only.** They record absolute paths, and the same
+  checkout is `/workspace` in the guest and a `~/...` path on the Mac, so a
+  worktree works on exactly one side of that line. See
+  [Worktrees isolate parallel sessions](#worktrees-isolate-parallel-sessions).
 - **Slower startup.** Each `ccrun` boots a VM (~1.2 s) before Claude Code
   starts. `ccx` against a running session is ~0.1 s.
 - **Some hosts have no guest network egress at all** (endpoint-security packet
@@ -365,6 +647,13 @@ directory is mounted at all (`ccxs -c 'ls /opt/cc-local'`) before suspecting
 `PATH`: an entry missing from `CC_EXTRA_VOLUME_ARGS` looks identical, from
 inside, to a `PATH` problem. Note that a mount added to `config.sh` only reaches
 a running session after `ccdown && ccup`.
+
+**A worktree is `prunable` on the host, or Claude Code refuses one with
+`Refusing to use <path> as an isolation worktree`.** Both are the same cause: the
+worktree was created on the other side of the mount, and its recorded absolute
+path does not resolve there. Create worktrees in the guest with
+`ccx --worktree <name>` and `git worktree lock` them; a host-created worktree has
+to be recreated, its files are left in place to salvage first.
 
 ## Licence
 

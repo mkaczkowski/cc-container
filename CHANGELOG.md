@@ -35,3 +35,22 @@ First public release.
   session needs recycling.
 - Optional `~/.config/cc-container/Dockerfile.local`, built on top of the repo
   image, so adding tools never means forking the Dockerfile.
+- Documented `ccx --worktree` for isolating parallel sessions. It needs no
+  configuration, because Claude Code places worktrees under the repo root, which
+  is already the mount. The caveat is that worktrees record absolute paths, so
+  one created in the guest reads as `prunable` on the host and one created on the
+  host is refused in the guest; `git worktree lock` is the fix for the first.
+- Documented `worktree.sparsePaths` for large repos, where a worktree's full
+  checkout is written through the bind mount onto host disk. Includes how it
+  composes with `.worktreeinclude`, which copies gitignored files in regardless
+  of the sparse set.
+- Measured where worktree bootstrap time goes: writing a dependency tree through
+  the bind mount is metadata-bound, 94x slower than the container filesystem for
+  the same 3,000 files, and hardlinking saves disk rather than time. Documented
+  the store placement and the bootstrap hook that follow from it.
+- Corrected that bootstrap hook to run asynchronously. A `SessionStart` hook blocks
+  session initialisation, so installing from one directly presents as a hung
+  session. The pattern is now `async` + `asyncRewake` for the worker, a
+  millisecond-cheap synchronous hook emitting `additionalContext` so Claude does
+  not build against an empty tree, and a marker file the statusline renders so the
+  wait is visible to the user.
