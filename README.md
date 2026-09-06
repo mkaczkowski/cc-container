@@ -63,6 +63,9 @@ volume, so later runs start authenticated.
 | `cc-container` | `ccrun` | One-off throwaway session (`--rm`) |
 | `cc-shell` | `ccsh` | One-off throwaway bash shell |
 | `cc-doctor` | — | Check every prerequisite; record the egress verdict |
+| `cc-sim-up` | — | Start the Xcode/simctl bridge by hand (`ccup` does it for you) |
+| `cc-sim-down` | — | Stop it |
+| `cc-sim-log` | — | Its log (`-f` to follow) |
 | `cc-update` | `ccupd` | Pull the repo and apply what the pull cannot |
 | `cc-container-upgrade` | — | Upgrade Claude Code in the image |
 | `cc-container-build` | — | Rebuild the image |
@@ -441,10 +444,51 @@ To customise it, copy it to `~/.config/cc-container/local/` (mounted at
 `/opt/cc-local`, also on the guest `PATH`) and point the command there instead.
 Updates will never overwrite it in that location.
 
+## Driving the Mac's Xcode toolchain from the guest
+
+Xcode, `xcrun` and `simctl` are macOS-only. No container configuration changes
+that, so an agent in the guest correctly concludes it cannot build an iOS app and
+stops. The fix is a channel, not an installation: `host/mac-sim-shim.py` runs on
+the Mac and exposes a **fixed allowlist** of verbs over HTTP on the bridge
+address, and `guest/mac-sim` forwards to it. The host does the work; results come
+back through the bind-mounted workspace, so a screenshot written under
+`/workspace` is readable in the container.
+
+```bash
+cp config/mac-sim.example.json ~/.config/cc-container/mac-sim.json
+$EDITOR ~/.config/cc-container/mac-sim.json   # declare a project root
+```
+
+That file is the whole opt-in. **Without it there is no listener, no `MAC_SIM_*`
+env in the container and nothing extra running on the Mac**, so an install that
+ignores this section is unaffected. With it, `ccup` starts the shim whenever you
+launch from inside a declared project root, and `ccdown` stops it.
+
+```bash
+mac-sim list                       # simulators, from inside the container
+mac-sim boot
+mac-sim run --profile e2e          # a project command you declared
+mac-sim screenshot .mac-sim/x.png  # then read the PNG to see the UI
+```
+
+Beyond the built-in simctl verbs, you declare your own commands as argv
+templates in that JSON: a build, a dev server with a readiness probe, an E2E
+runner. Nothing is a shell string and nothing takes free-form arguments, so the
+guest can only ask for combinations you wrote down. Commands run in **the
+checkout you call from**, git worktrees included, and a checkout claims the
+simulator while it uses it, so two sessions cannot silently overwrite each
+other's build.
+
+Read [docs/MAC-SIM.md](docs/MAC-SIM.md) for the config format and
+[SECURITY.md](SECURITY.md) for what this widens: it is a host escape hatch by
+design, which is why it is off until you write that file.
+
 ## Extending it with your own host tooling
 
-Some tools only exist on macOS and never will in a Linux guest. Rather than
-bundle any particular one, the wrapper gives you three seams in `config.sh`:
+Some tools only exist on macOS and never will in a Linux guest. `mac-sim` above
+is the one this repo ships, because an Xcode bridge is the case nearly every
+Apple-silicon user hits. For anything else, the wrapper gives you three seams in
+`config.sh` rather than bundling more:
 
 | Setting | What it does |
 |---|---|
@@ -546,6 +590,9 @@ does not follow that, and the guest stops seeing the file at all — silently.
 
 ## Limitations
 
+- **No Xcode, ever.** It cannot be installed in a Linux guest. Drive the Mac's
+  copy instead, through the opt-in bridge described in
+  [Driving the Mac's Xcode toolchain from the guest](#driving-the-macs-xcode-toolchain-from-the-guest).
 - **No browser.** The Playwright and Chrome DevTools skills need one. Add
   `npx playwright install --with-deps chromium` to the Dockerfile for headless
   runs (large layer).

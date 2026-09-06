@@ -22,9 +22,11 @@ entirely yours, and deserves real thought.
 ## If you bridge a host-only tool
 
 Some toolchains cannot exist in a Linux guest — Xcode is the obvious one. Guest →
-host TCP works, so the tempting fix is a small host-side listener that the
-container can call. This project ships no such bridge, but it gives you the
-hooks to build one, so here is what to get right if you do.
+host TCP works, so the fix is a small host-side listener that the container can
+call. This project ships exactly one, `mac-sim` (see
+[docs/MAC-SIM.md](docs/MAC-SIM.md)), and it is **off until you write
+`~/.config/cc-container/mac-sim.json`**: no config, no listener. The rules below
+are what it implements, and what to get right if you build another.
 
 **A bridge is a hole in the VM boundary.** Everything it can be asked to run
 happens on your Mac, as you, outside the sandbox. Treat it as an RPC surface
@@ -47,8 +49,10 @@ with a threat model, not as a convenience script:
 
 Even done well, the residual risk is real: if a bridged command is something like
 `npm test`, and the agent can edit that project's `package.json`, then the agent
-can run arbitrary host code. Scope the roots deliberately and start the bridge
-only when you are working in one of them.
+can run arbitrary host code. That is not hypothetical for `mac-sim` -- a declared
+`run` command that shells out to a package manager has exactly this shape. Scope
+the roots deliberately, declare only the commands you need, and note that the
+shim starts only while you are working inside one of those roots.
 
 ## Running as root
 

@@ -15,9 +15,24 @@ First public release.
   running the egress probe once and recording the verdict, rather than starting
   a proxy on every invocation.
 - `cc-doctor`: prerequisite and egress diagnostics.
-- Host-side tooling is not bundled. `CC_EXTRA_RUN_ARGS`, `CC_PRE_RUN_HOOK` and
-  `CC_POST_DOWN_HOOK`, plus a `/opt/cc-local` directory on the guest `PATH`, are
-  the seams for wiring up your own; `SECURITY.md` covers how to do it safely.
+- `mac-sim`: an opt-in bridge that lets the guest drive the Mac's Xcode and
+  simctl toolchain, which cannot exist in a Linux VM. A host listener
+  (`host/mac-sim-shim.py`) exposes a fixed allowlist of verbs on the bridge
+  address; `guest/mac-sim` forwards to it. Projects and their commands are argv
+  templates declared in `~/.config/cc-container/mac-sim.json`: no shell string,
+  no free-form argument, every path resolved inside a declared root. Inert until
+  that file exists, so an install that does not want it gets no listener and no
+  container env. `cc-sim-up` / `cc-sim-down` / `cc-sim-log`, auto-started by
+  `ccup` and stopped by `ccdown`, and reported by `ccst`. See `docs/MAC-SIM.md`.
+- Commands run in the checkout the guest calls from, so a `ccx --worktree`
+  session builds and verifies its own branch instead of the main checkout. A
+  checkout also claims the simulator while it uses it (one device, one bundle
+  id, one bundler port are shared), and a command from another checkout is
+  refused naming the holder rather than replacing its build.
+- Other host-side tooling is still not bundled. `CC_EXTRA_RUN_ARGS`,
+  `CC_PRE_RUN_HOOK` and `CC_POST_DOWN_HOOK`, plus a `/opt/cc-local` directory on
+  the guest `PATH`, are the seams for wiring up your own; `SECURITY.md` covers
+  how to do it safely.
 - `cc-proxy-down` kills only the tinyproxy this tool started; logs and state
   moved out of `/tmp` into `~/.local/state/cc-container/`.
 - Container lookups parse JSON instead of prefix-matching `container list`.

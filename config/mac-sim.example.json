@@ -1,0 +1,34 @@
+{
+  "//": "Minimal mac-sim config. Copy to ~/.config/cc-container/mac-sim.json and",
+  "//1": "edit. The shim does not start at all until this file exists and your",
+  "//2": "launch directory is inside one of the roots below, so an unconfigured",
+  "//3": "install has no host listener and no extra attack surface.",
+  "//4": "",
+  "//5": "This declares only the built-in simctl verbs (list, boot, install,",
+  "//6": "launch, screenshot, logs, openurl, build, ...). For project commands of",
+  "//7": "your own -- a build, a dev server, an E2E runner -- see",
+  "//8": "examples/expo-monorepo.mac-sim.json and docs/MAC-SIM.md.",
+
+  "listen": { "host": "192.168.64.1", "port": 8890, "allow": "192.168.64.0/24" },
+
+  "//9": "How long a checkout keeps its claim on the simulator after a command",
+  "//10": "finishes. Set enabled:false to let any checkout drive it at any time.",
+  "lock": { "enabled": true, "ttl": 14400 },
+
+  "projects": [
+    {
+      "name": "my-app",
+      "root": "~/dev/my-app",
+      "guest_mount": "/workspace",
+
+      "defaults": {
+        "device": "iPhone 17 Pro",
+        "bundle_id": "com.example.myapp",
+        "workspace": "ios/MyApp.xcworkspace",
+        "scheme": "MyApp"
+      },
+
+      "commands": {}
+    }
+  ]
+}

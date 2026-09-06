@@ -1,0 +1,439 @@
+#!/usr/bin/env python3
+"""Guest-side CLI for the host's Xcode/simctl shim.
+
+Xcode does not exist in this Linux container. This forwards a scoped set of
+verbs to the shim running on the macOS host, which executes them there and
+returns the output. Results that are files (screenshots, build products) land in
+the bind-mounted workspace, so they are readable from in here.
+
+Built-in simulator verbs work for any project:
+
+  mac-sim list                          # available simulators
+  mac-sim boot                          # default device; -d "iPhone 16" to change
+  mac-sim install <path/to/App.app>
+  mac-sim launch [bundle.id]
+  mac-sim screenshot [out.png]          # must land inside the workspace
+  mac-sim logs --last 5m --lines 300
+  mac-sim openurl myapp://
+  mac-sim build                         # xcodebuild the project's workspace
+
+Project commands come from the host config (`mac-sim commands` lists them):
+
+  mac-sim commands                      # what this project declares
+  mac-sim run                           # e.g. a declared "run" command
+  mac-sim run --profile e2e             # ...in its "e2e" variant
+  mac-sim metro start --profile e2e     # `<cmd> start` is the command itself
+  mac-sim metro status                  # `<cmd> <sub>` -> the "metro-status" command
+  mac-sim maestro --tags functional     # a declared parameter, as a flag
+  mac-sim maestro .maestro/flows/x.yaml # ...or its one path parameter, bare
+
+A project command's own parameters are real flags, taken from the host config, so
+`mac-sim capture --help` lists what capture accepts. `--profile` names a variant
+unless the command declares a parameter of that name. `-V` and `--arg key=value`
+still work.
+
+Everything runs in the checkout you call from, worktrees included: the CLI sends
+its own checkout root and the host resolves paths from there. Because one Mac has
+one simulator, one installed bundle id and one bundler port, a checkout claims
+those while it uses them:
+
+  mac-sim lock                          # who holds the simulator
+  mac-sim release                       # hand it back
+  mac-sim run -f                        # take it over from another checkout
+"""
+
+import argparse
+import json
+import os
+import sys
+import urllib.error
+import urllib.request
+
+SHIM = os.environ.get("MAC_SIM_SHIM", "http://192.168.64.1:8890")
+TOKEN = os.environ.get("MAC_SIM_TOKEN", "")
+DEVICE = os.environ.get("MAC_SIM_DEVICE")
+
+BUILTINS = {"list", "booted", "runtimes", "boot", "shutdown", "gui", "install",
+            "launch", "terminate", "uninstall", "openurl", "screenshot", "logs",
+            "build", "commands", "lock", "release"}
+
+# Options that consume the next argument. Needed to find the subcommand: without
+# it `mac-sim -d "iPhone 16" boot` reads the device name as the subcommand and
+# forwards it to the host as an undeclared project command.
+VALUE_OPTS = {"-d", "--device", "-p", "--project", "-w", "--workdir",
+              "-V", "--variant", "--arg", "--last", "--lines", "--predicate",
+              "--workspace", "--scheme", "--configuration"}
+
+
+def checkout_root(start=None):
+    """The nearest ancestor holding a .git entry, or None.
+
+    A git worktree's .git is a FILE rather than a directory, which is exactly the
+    case this exists for: a session started with `ccx --worktree <name>` lives in
+    /workspace/.claude/worktrees/<name>, and the host must act on that checkout
+    rather than on the main one.
+    """
+    path = os.path.abspath(start or os.getcwd())
+    while True:
+        if os.path.exists(os.path.join(path, ".git")):
+            return path
+        parent = os.path.dirname(path)
+        if parent == path:
+            return None
+        path = parent
+
+
+WORKDIR = os.environ.get("MAC_SIM_WORKDIR") or checkout_root()
+
+UNREACHABLE = (
+    "mac-sim: cannot reach the host shim at {shim} ({reason}).\n"
+    "The shim runs on macOS and cannot be started from in here.\n"
+    "On the Mac, run:  cc-sim-up\n"
+    "It starts automatically for directories inside a project root declared in\n"
+    "~/.config/cc-container/mac-sim.json; this workspace may be outside them."
+)
+
+
+def request(method, payload=None, timeout=2500):
+    # The proxy (when there is one) is for outbound internet; the shim is a
+    # direct host call and must not be proxied.
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    headers = {"Content-Type": "application/json", "X-Mac-Sim-Token": TOKEN}
+    url = SHIM + ("/health" if method == "GET" else "")
+    data = json.dumps(payload).encode() if payload is not None else None
+    req = urllib.request.Request(url, data=data, headers=headers, method=method)
+    try:
+        with opener.open(req, timeout=timeout) as resp:
+            return json.load(resp)
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode(errors="replace")
+        if exc.code == 401:
+            sys.exit("mac-sim: the shim rejected this container's token. "
+                     "Recycle the session on the Mac (cc-down && cc-up).")
+        # The shim's refusals are multi-line and meant to be acted on; printing
+        # the raw JSON turns them into one escaped line nobody reads.
+        try:
+            detail = json.loads(detail)["error"]
+        except (ValueError, KeyError, TypeError):
+            pass
+        if exc.code == 409:
+            sys.exit(f"mac-sim: {detail}")
+        sys.exit(f"mac-sim: shim rejected the request (HTTP {exc.code}): {detail}")
+    except urllib.error.URLError as exc:
+        sys.exit(UNREACHABLE.format(shim=SHIM, reason=exc.reason))
+
+
+def call(payload, timeout=2500):
+    return request("POST", payload, timeout)
+
+
+def emit(result, quiet_stdout=False):
+    """Print a shim result and exit non-zero if the host command failed."""
+    if result.get("stdout") and not quiet_stdout:
+        print(result["stdout"])
+    if result.get("stderr"):
+        print(result["stderr"], file=sys.stderr)
+    code = result.get("exit_code", 0)
+    if code != 0:
+        sys.exit(f"mac-sim: {result.get('verb')} failed on the host "
+                 f"(exit {code}); see output above")
+    return result
+
+
+def pretty_devices(raw):
+    for runtime, devices in sorted(json.loads(raw).get("devices", {}).items()):
+        avail = [d for d in devices if d.get("isAvailable")]
+        if not avail:
+            continue
+        print(runtime.rsplit(".", 1)[-1])
+        for d in avail:
+            print(f"  {d['state']:<10} {d['name']}  ({d['udid']})")
+
+
+def guest_abspath(raw):
+    """Absolutize before sending: the shim resolves paths on the host, so a
+    relative path would resolve against the host's cwd, not the caller's."""
+    return raw if os.path.isabs(raw) else os.path.abspath(raw)
+
+
+def print_commands(health):
+    print(f"checkout: {WORKDIR or 'unknown (not in a git checkout)'}")
+    for name, project in health.get("projects", {}).items():
+        print(f"{name}  ({project['root']})")
+        owner = project.get("owner")
+        if owner:
+            mine = " (this checkout)" if owner.get("workdir") == WORKDIR else ""
+            print(f"  simulator held by: {owner.get('workdir')}{mine}")
+        defaults = project.get("defaults") or {}
+        if defaults:
+            print("  defaults: " + ", ".join(f"{k}={v}" for k, v in sorted(defaults.items())))
+        if not project["commands"]:
+            print("  (no project commands declared)")
+        for cname, spec in sorted(project["commands"].items()):
+            bits = []
+            if spec["variants"]:
+                bits.append("variants: " + "|".join(spec["variants"]))
+            if spec["params"]:
+                bits.append("args: " + ", ".join(sorted(spec["params"])))
+            print(f"  {cname:<14}{('  ' + '; '.join(bits)) if bits else ''}")
+
+
+def first_positional(argv):
+    """(value, index) of the first argument that is a subcommand, not an option
+    or an option's value."""
+    i = 0
+    while i < len(argv):
+        arg = argv[i]
+        if arg.startswith("--") and "=" in arg:
+            i += 1
+        elif arg in VALUE_OPTS:
+            i += 2
+        elif arg.startswith("-"):
+            i += 1
+        else:
+            return arg, i
+    return None, -1
+
+
+def kv(raw):
+    if "=" not in raw:
+        raise argparse.ArgumentTypeError("--arg expects key=value")
+    key, _, value = raw.partition("=")
+    return key, value
+
+
+def preflight_project(argv):
+    """-p/--project, read before the real parse: the command's own flags are
+    built from the host's declarations, and those are per project."""
+    for i, arg in enumerate(argv):
+        if arg in ("-p", "--project") and i + 1 < len(argv):
+            return argv[i + 1]
+        if arg.startswith("--project="):
+            return arg.split("=", 1)[1]
+    return None
+
+
+def declared_commands(health, project_name):
+    projects = health.get("projects", {})
+    if project_name:
+        if project_name not in projects:
+            sys.exit(f"mac-sim: unknown project {project_name!r}; declared: "
+                     f"{', '.join(sorted(projects)) or 'none'}")
+        return projects[project_name]["commands"]
+    if len(projects) == 1:
+        return next(iter(projects.values()))["commands"]
+    # Several projects and no -p: merge, and let the shim raise the ambiguity.
+    return {name: spec for p in projects.values()
+            for name, spec in p["commands"].items()}
+
+
+def resolve_command(commands, name, rest):
+    """Map `<cmd> [<sub>]` onto a declared command, returning (name, rest).
+
+    `metro status` -> the "metro-status" command and `metro start` -> "metro"
+    read better than hyphenated names, and are the forms the project's own docs
+    and agent definitions already use. A leftover positional becomes the
+    command's path parameter when it has exactly one, so a flow file can be named
+    directly instead of as --flow.
+    """
+    def known(resolved, tail):
+        if resolved not in commands:
+            sys.exit(f"mac-sim: no command {resolved!r}; declared: "
+                     f"{', '.join(sorted(commands)) or 'none'}")
+        return resolved, tail
+
+    if not rest or rest[0].startswith("-"):
+        return known(name, rest)
+    sub_name, tail = rest[0], rest[1:]
+    if f"{name}-{sub_name}" in commands:
+        return f"{name}-{sub_name}", tail
+    if sub_name == "start" and name in commands:
+        return name, tail
+    known(name, tail)  # an unknown command must say so before blaming its args
+    paths = [p for p, spec in commands.get(name, {}).get("params", {}).items()
+             if spec.get("path")]
+    if len(paths) == 1:
+        return known(name, [f"--{paths[0]}", sub_name] + tail)
+    subs = sorted(c[len(name) + 1:] for c in commands if c.startswith(f"{name}-"))
+    sys.exit(f"mac-sim {name}: unexpected argument {sub_name!r}. "
+             + (f"Subcommands: {', '.join(['start'] + subs)}." if subs else
+                f"Pass parameters as flags; see `mac-sim {name} --help`."))
+
+
+def command_parser(name, spec, common):
+    """A parser carrying the command's declared parameters as real flags, so
+    --help is accurate and an undeclared flag fails here rather than on the Mac."""
+    params, variants = spec.get("params", {}), sorted(spec.get("variants", []))
+    pc = argparse.ArgumentParser(prog=f"mac-sim {name}", parents=[common])
+    pc.add_argument("-V", "--variant", default=None,
+                    choices=variants or None, help="build profile")
+    pc.add_argument("--arg", type=kv, action="append", default=[],
+                    metavar="KEY=VALUE", help="declared parameter (legacy form)")
+    for param in sorted(params):
+        pc.add_argument(f"--{param}", default=None, dest=f"param_{param}",
+                        metavar=param.upper(), help="declared parameter")
+    # --profile is the variant, except where the command declares a parameter of
+    # that name (a capture profile is a dataset, not a build flag).
+    if "profile" not in params and variants:
+        pc.add_argument("--profile", dest="variant", choices=variants,
+                        help="alias for --variant")
+    return pc, params
+
+
+def scope_of(a):
+    """The fields every request carries: which project, which checkout, which
+    device, and whether to take the simulator over."""
+    scope = {}
+    if a.device:
+        scope["device"] = a.device
+    if a.project:
+        scope["project"] = a.project
+    if a.workdir:
+        scope["workdir"] = guest_abspath(a.workdir)
+    if a.force:
+        scope["force"] = True
+    return scope
+
+
+def main():
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument("-d", "--device", default=DEVICE,
+                        help="simulator name (default: the project's)")
+    common.add_argument("-p", "--project", default=None,
+                        help="project name (only needed if several are configured)")
+    common.add_argument("-w", "--workdir", default=WORKDIR,
+                        help="checkout to act on (default: the one you are in)")
+    common.add_argument("-f", "--force", action="store_true",
+                        help="take the simulator over from another checkout")
+    ap = argparse.ArgumentParser(
+        prog="mac-sim", description=__doc__, parents=[common],
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = ap.add_subparsers(dest="cmd", required=True)
+
+    def add(name):
+        return sub.add_parser(name, parents=[common])
+
+    for name in ("list", "booted", "runtimes", "boot", "shutdown", "gui",
+                 "commands", "lock", "release"):
+        add(name)
+    p = add("install"); p.add_argument("app")
+    for name in ("launch", "terminate", "uninstall"):
+        p = add(name); p.add_argument("bundle_id", nargs="?")
+    p = add("openurl"); p.add_argument("url")
+    p = add("screenshot"); p.add_argument("out", nargs="?", default=None)
+    p = add("logs")
+    p.add_argument("--last", default="2m")
+    p.add_argument("--lines", type=int, default=200)
+    p.add_argument("--predicate")
+    p = add("build")
+    p.add_argument("--workspace")
+    p.add_argument("--scheme")
+    p.add_argument("--configuration", default="Debug", choices=["Debug", "Release"])
+
+    # Any subcommand that is not built in is a project command declared in the
+    # host config. Parse those generically rather than hardcoding one project's
+    # verbs into this CLI.
+    argv = sys.argv[1:]
+    first, idx = first_positional(argv)
+    if first is not None and first not in BUILTINS:
+        # Drop the subcommand by position: dropping every argument equal to it
+        # would also eat an option value that happened to match.
+        rest = argv[:idx] + argv[idx + 1:]
+        commands = declared_commands(request("GET", timeout=30),
+                                     preflight_project(argv))
+        name, rest = resolve_command(commands, first, rest)
+        pc, params = command_parser(name, commands.get(name, {}), common)
+        a = pc.parse_args(rest)
+        args = dict(a.arg)
+        args.update({p: v for p in params
+                     if (v := getattr(a, f"param_{p}", None)) is not None})
+        payload = {"verb": "project_command", "command": name,
+                   "args": args, **scope_of(a)}
+        if a.variant:
+            payload["variant"] = a.variant
+        # These run for minutes; say which checkout is being built before the
+        # wait starts, so a wrong-worktree call is caught then and not after.
+        print(f"mac-sim {name}: {a.workdir or 'project root'}", file=sys.stderr)
+        return emit(call(payload))
+
+    a = ap.parse_args()
+    scope = scope_of(a)
+
+    if a.cmd == "commands":
+        return print_commands(request("GET", timeout=30))
+
+    if a.cmd in ("lock", "release"):
+        payload = {"verb": "lock", **scope}
+        if a.cmd == "release":
+            payload["action"] = "release"
+        return emit(call(payload, timeout=30))
+
+    if a.cmd in ("list", "booted", "runtimes"):
+        res = call({"verb": a.cmd})
+        if res.get("exit_code"):
+            emit(res)
+        if a.cmd == "runtimes":
+            print(res["stdout"])
+        else:
+            pretty_devices(res["stdout"])
+        return
+
+    if a.cmd == "gui":
+        return emit(call({"verb": "open_simulator_ui"}))
+
+    if a.cmd in ("boot", "shutdown"):
+        res = call({"verb": a.cmd, **scope})
+        # Re-booting an already-booted device is not an error worth failing on.
+        if res.get("exit_code") and "current state: Booted" in res.get("stderr", ""):
+            print("already booted")
+            return
+        emit(res)
+        print("booted" if a.cmd == "boot" else "shut down")
+        return
+
+    if a.cmd == "install":
+        res = emit(call({"verb": "install", "app": guest_abspath(a.app), **scope}))
+        print(f"installed {res.get('bundle_id') or a.app}")
+        return
+
+    if a.cmd in ("launch", "terminate", "uninstall"):
+        payload = {"verb": a.cmd, **scope}
+        if a.bundle_id:
+            payload["bundle_id"] = a.bundle_id
+        emit(call(payload))
+        print(f"{a.cmd}: {a.bundle_id or 'default bundle'}")
+        return
+
+    if a.cmd == "openurl":
+        emit(call({"verb": "openurl", "url": a.url, **scope}))
+        print(f"opened {a.url}")
+        return
+
+    if a.cmd == "screenshot":
+        local = guest_abspath(
+            a.out or os.path.join(a.workdir or "/workspace", ".mac-sim/screenshot.png"))
+        res = emit(call({"verb": "screenshot", "out": local, **scope}),
+                   quiet_stdout=True)
+        if not os.path.exists(local):
+            sys.exit(f"mac-sim: the host wrote {res.get('path')} but it is not "
+                     f"visible at {local}; is that path inside the bind mount?")
+        print(f"{local} ({os.path.getsize(local)} bytes)")
+        return
+
+    if a.cmd == "logs":
+        payload = {"verb": "logs", "last": a.last, "lines": a.lines, **scope}
+        if a.predicate:
+            payload["predicate"] = a.predicate
+        return emit(call(payload))
+
+    if a.cmd == "build":
+        payload = {"verb": "xcodebuild", "configuration": a.configuration, **scope}
+        if a.workspace:
+            payload["workspace"] = guest_abspath(a.workspace)
+        if a.scheme:
+            payload["scheme"] = a.scheme
+        return emit(call(payload))
+
+
+if __name__ == "__main__":
+    main()

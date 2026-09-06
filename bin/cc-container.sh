@@ -71,7 +71,20 @@ CC_SKIP_PERMISSIONS="${CC_SKIP_PERMISSIONS:-1}"
 # Long-lived shared session (cc-up / cc-attach).
 CC_SESSION_NAME="${CC_SESSION_NAME:-cc-session}"
 
-# Extension points, for host-side tooling this project does not ship.
+# The mac-sim bridge: scoped guest access to the Mac's Xcode/simctl toolchain.
+# Xcode is macOS-only and a Linux guest can never run it, so host/mac-sim-shim.py
+# exposes a fixed allowlist of verbs on the bridge address and guest/mac-sim
+# forwards to it. Entirely opt-in: with no mac-sim.json there is no listener, no
+# MAC_SIM_* env in the container and nothing extra on the host, so an install
+# that never configures it is unaffected. See docs/MAC-SIM.md.
+CC_SIM_CONFIG="${CC_SIM_CONFIG:-${CC_CONFIG_DIR}/mac-sim.json}"
+CC_SIM_TOKEN_FILE="${CC_SIM_TOKEN_FILE:-${CC_STATE_DIR}/mac-sim.token}"
+CC_SIM_LOG="${CC_SIM_LOG:-${CC_STATE_DIR}/mac-sim-shim.log}"
+CC_SIM_AUTO="${CC_SIM_AUTO:-1}"
+
+# Extension points, for host-side tooling this project does not ship. (The
+# mac-sim bridge above is the one exception, because it is inert until you
+# declare a project; everything else of your own goes through these.)
 #
 #   CC_EXTRA_RUN_ARGS   extra `container run` arguments (--env, --volume, ...),
 #                       applied to both one-off runs and the shared session
@@ -233,6 +246,89 @@ _cc_proxy_collect() {
   return 0
 }
 
+# ---------------------------------------------------------------------------
+# mac-sim: the host-side Xcode/simctl bridge
+# ---------------------------------------------------------------------------
+_cc_sim_configured() { [ -r "${CC_SIM_CONFIG}" ]; }
+
+# Read the address from the config rather than keeping a second copy here: a
+# divergence would leave this polling one port while the shim listened on
+# another, reporting a failure to start when it had in fact started elsewhere.
+_cc_sim_host() { jq -r '.listen.host // "192.168.64.1"' "${CC_SIM_CONFIG}" 2>/dev/null; }
+_cc_sim_port() { jq -r '.listen.port // 8890'           "${CC_SIM_CONFIG}" 2>/dev/null; }
+
+# Is the launch directory inside a declared project root? The shim can only act
+# on a declared project, so starting it anywhere else would add host attack
+# surface for nothing.
+_cc_sim_in_project() {
+  local root
+  while IFS= read -r root; do
+    [ -n "${root}" ] || continue
+    root="${root/#\~/$HOME}"
+    case "${PWD}/" in "${root}"/*) return 0 ;; esac
+  done < <(jq -r '.projects[]?.root // empty' "${CC_SIM_CONFIG}" 2>/dev/null)
+  return 1
+}
+
+cc-sim-up() {
+  if ! _cc_sim_configured; then
+    echo "cc-sim-up: no config at ${CC_SIM_CONFIG}" >&2
+    echo "Copy ${CC_CONTAINER_REPO}/config/mac-sim.example.json there, then declare a project root." >&2
+    return 1
+  fi
+  local port; port="$(_cc_sim_port)"
+  [ -n "${port}" ] || { echo "cc-sim-up: cannot read listen.port from ${CC_SIM_CONFIG}" >&2; return 1; }
+  _cc_listening "${port}" && return 0
+  # The token is shared by file, so the guest never has to be told a secret it
+  # could log; it is generated once and reused across restarts.
+  [ -s "${CC_SIM_TOKEN_FILE}" ] \
+    || (umask 077; head -c 32 /dev/urandom | xxd -p -c 64 > "${CC_SIM_TOKEN_FILE}")
+  MAC_SIM_CONFIG="${CC_SIM_CONFIG}" MAC_SIM_TOKEN_FILE="${CC_SIM_TOKEN_FILE}" \
+    python3 "${CC_CONTAINER_REPO}/host/mac-sim-shim.py" >"${CC_SIM_LOG}" 2>&1 &
+  local i
+  for i in $(seq 1 30); do
+    _cc_listening "${port}" && break
+    sleep 0.1
+  done
+  _cc_listening "${port}" \
+    || { echo "cc-sim-up: shim failed to start; see ${CC_SIM_LOG}" >&2; return 1; }
+  echo "mac-sim: shim listening on $(_cc_sim_host):${port}"
+}
+
+cc-sim-down() {
+  pkill -f "mac-sim-shim.py" 2>/dev/null && echo "stopped:  mac-sim shim"
+  return 0
+}
+
+cc-sim-log() {
+  [ -r "${CC_SIM_LOG}" ] || { echo "cc-sim-log: no log at ${CC_SIM_LOG}" >&2; return 1; }
+  if [ "$#" -eq 0 ]; then tail -n 50 "${CC_SIM_LOG}"; else tail "$@" "${CC_SIM_LOG}"; fi
+}
+
+# Run before every container start. Kept in its own array rather than appended
+# to CC_EXTRA_RUN_ARGS: that one belongs to config.sh, and appending to it would
+# accumulate duplicate --env flags across repeated cc-up calls in one shell.
+CC_SIM_RUN_ARGS=()
+_cc_sim_auto_up() {
+  CC_SIM_RUN_ARGS=()
+  [ "${CC_SIM_AUTO}" = "1" ] || return 0
+  _cc_sim_configured || return 0
+  # Outside every declared root: no shim, and no env pointing at one, so
+  # `mac-sim` in the guest reports plainly that it has nothing to talk to.
+  _cc_sim_in_project || return 0
+  cc-sim-up || return 1
+  CC_SIM_RUN_ARGS=(
+    --env "MAC_SIM_SHIM=http://$(_cc_sim_host):$(_cc_sim_port)"
+    --env "MAC_SIM_TOKEN=$(cat "${CC_SIM_TOKEN_FILE}")"
+  )
+}
+
+_cc_sim_auto_down() {
+  [ "${CC_SIM_AUTO}" = "1" ] || return 0
+  _cc_sim_configured || return 0
+  cc-sim-down
+}
+
 # Run a named host-side hook, if config.sh declared one.
 _cc_call_hook() {
   [ -n "$1" ] || return 0
@@ -259,6 +355,7 @@ _cc_run() {
   fi
   cc-runtime-up || return 1
   _cc_proxy_collect || return 1
+  _cc_sim_auto_up || return 1
   _cc_call_hook "${CC_PRE_RUN_HOOK}" CC_PRE_RUN_HOOK || return 1
   _cc_mcp_collect
   # -it needs a real TTY; fall back for piped/scripted use (e.g. claude -p).
@@ -271,6 +368,7 @@ _cc_run() {
     ${CC_EXTRA_VOLUME_ARGS+"${CC_EXTRA_VOLUME_ARGS[@]}"} \
     ${CC_MCP_ARGS+"${CC_MCP_ARGS[@]}"} \
     ${CC_EXTRA_RUN_ARGS+"${CC_EXTRA_RUN_ARGS[@]}"} \
+    ${CC_SIM_RUN_ARGS+"${CC_SIM_RUN_ARGS[@]}"} \
     ${CC_PROXY_ARGS+"${CC_PROXY_ARGS[@]}"} \
     --workdir /workspace \
     --dns 8.8.8.8 \
@@ -302,6 +400,7 @@ _cc_session_state() {
 cc-up() {
   cc-runtime-up || return 1
   _cc_proxy_collect || return 1
+  _cc_sim_auto_up || return 1
   _cc_call_hook "${CC_PRE_RUN_HOOK}" CC_PRE_RUN_HOOK || return 1
   _cc_mcp_collect
   local state; state="$(_cc_session_state)"
@@ -322,6 +421,7 @@ cc-up() {
       ${CC_EXTRA_VOLUME_ARGS+"${CC_EXTRA_VOLUME_ARGS[@]}"} \
       ${CC_MCP_ARGS+"${CC_MCP_ARGS[@]}"} \
       ${CC_EXTRA_RUN_ARGS+"${CC_EXTRA_RUN_ARGS[@]}"} \
+    ${CC_SIM_RUN_ARGS+"${CC_SIM_RUN_ARGS[@]}"} \
       ${CC_PROXY_ARGS+"${CC_PROXY_ARGS[@]}"} \
       --workdir /workspace \
       --dns 8.8.8.8 \
@@ -383,6 +483,7 @@ cc-down() {
     return 0
   fi
   _cc_listening "${CC_PROXY_PORT}" && cc-proxy-down >/dev/null 2>&1 && echo "stopped:  proxy"
+  _cc_sim_auto_down
   _cc_call_hook "${CC_POST_DOWN_HOOK}" CC_POST_DOWN_HOOK
   return 0
 }
@@ -398,6 +499,14 @@ cc-status() {
         echo "proxy:    down (mode=${CC_PROXY}; direct egress assumed, run cc-doctor to verify)"
       fi ;;
   esac
+  if _cc_sim_configured; then
+    local sim_port; sim_port="$(_cc_sim_port)"
+    if _cc_listening "${sim_port}"; then
+      echo "sim:      shim listening on $(_cc_sim_host):${sim_port}"
+    else
+      echo "sim:      down (starts with ccup from inside a declared project root)"
+    fi
+  fi
   # Parse `container inspect` rather than scraping `container list` columns: a
   # stopped container has no IP, so column offsets shift and produce garbage.
   local info

@@ -1,0 +1,77 @@
+{
+  "//": "Worked example: a pnpm/Expo monorepo with a Maestro E2E suite.",
+  "//1": "Shows the three things that make a real project config non-trivial --",
+  "//2": "a build whose env flags are inlined at bundle time (hence variants +",
+  "//3": "kill_port), a detached dev server with a readiness probe, and a tool",
+  "//4": "that needs its own JDK on PATH.",
+
+  "listen": { "host": "192.168.64.1", "port": 8890 },
+
+  "projects": [
+    {
+      "name": "my-expo-app",
+      "root": "~/dev/my-expo-app",
+      "guest_mount": "/workspace",
+
+      "defaults": {
+        "device": "iPhone 17 Pro",
+        "bundle_id": "com.example.myapp",
+        "workspace": "apps/mobile/ios/MyApp.xcworkspace",
+        "scheme": "MyApp"
+      },
+
+      "commands": {
+        "run": {
+          "argv": ["pnpm", "--filter", "@myapp/mobile", "exec",
+                   "expo", "run:ios", "--device", "{udid}"],
+          "cwd": "apps/mobile",
+          "timeout": 2400,
+          "path_prepend": ["~/.gem/ruby/4.0.0/bin"],
+          "env": { "SENTRY_DISABLE_AUTO_UPLOAD": "true" },
+          "variants": {
+            "e2e": {
+              "env": { "EXPO_PUBLIC_E2E": "true" },
+              "kill_port": 8081
+            },
+            "demo": {
+              "argv": ["pnpm", "--filter", "@myapp/mobile", "run",
+                       "ios:demo", "--device", "{udid}"],
+              "env": { "EXPO_PUBLIC_E2E": "true", "EXPO_PUBLIC_DEMO_MODE": "true" },
+              "kill_port": 8081
+            }
+          }
+        },
+
+        "metro": {
+          "argv": ["pnpm", "--filter", "@myapp/mobile", "exec",
+                   "expo", "start", "--port", "8081"],
+          "cwd": "apps/mobile",
+          "detach": true,
+          "kill_port": 8081,
+          "ready_url": "http://localhost:8081/status",
+          "ready_match": "packager-status:running",
+          "log": "/tmp/metro.log",
+          "timeout": 120,
+          "variants": {
+            "e2e":  { "env": { "EXPO_PUBLIC_E2E": "true" } },
+            "demo": { "env": { "EXPO_PUBLIC_E2E": "true", "EXPO_PUBLIC_DEMO_MODE": "true" } }
+          }
+        },
+
+        "e2e": {
+          "argv": ["~/.maestro/bin/maestro", "test", "{flow}"],
+          "timeout": 3600,
+          "path_prepend": ["/Library/Java/JavaVirtualMachines/temurin-17.jdk/Contents/Home/bin"],
+          "env": { "JAVA_HOME": "/Library/Java/JavaVirtualMachines/temurin-17.jdk/Contents/Home" },
+          "params": {
+            "flow": { "path": true, "must_exist": true, "default": ".maestro" },
+            "tags": { "pattern": "^[A-Za-z0-9_,-]{1,64}$", "default": "" }
+          },
+          "optional_argv": [
+            { "when": "tags", "argv": ["--include-tags", "{tags}"] }
+          ]
+        }
+      }
+    }
+  ]
+}
