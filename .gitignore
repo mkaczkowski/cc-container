@@ -2,9 +2,12 @@
 # The runtime reads all of these from ~/.config/cc-container/ instead.
 config.sh
 mcp.env
-.idea
 mcp-servers.json
 *.local.*
+
+# Editor, OS and tooling artefacts. .idea/ in particular carries local paths and
+# IDE history, which has no business in a public repo.
+.idea/
 .DS_Store
 __pycache__/
 *.pyc

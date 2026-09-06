@@ -294,104 +294,54 @@ date > "${marker}"
 printf '%s' "${sum}" > "${stamp}"
 ```
 
+**Node's recursive `fs` calls are unreliable on the bind mount.** Worth knowing
+before it costs you a day, because it presents as a package bug. On `/workspace`,
+Node 22's native `fs.cpSync(src, dst, {recursive: true})` fails with `EACCES` on a
+destination directory it created moments earlier. It is the mount, not permissions:
+a two-file throwaway tree reproduces it, the same Node binary succeeds on the
+container's own filesystem, and coreutils succeeds on the identical paths.
+
+```
+virtiofs (/workspace):   cpSync FAILED: EACCES
+ext4 (/root):            cpSync OK
+cp -R, same paths:       OK
 ```
 
-**On a large repo, check out only what you need.** A worktree is a full
-checkout, and here that write goes through the bind mount onto host disk, so a
-big repo can spend tens of seconds on it. Limit it with `worktree.sparsePaths`
-in the project's `.claude/settings.json`:
+Three things make it stick rather than read as a flake:
 
-```json
-{"worktree": {"sparsePaths": ["src", "packages/foo"]}}
-```
+- **The failed copy poisons the tree.** It leaves an entry Node cannot handle, so a
+  later `fs.rmSync({recursive: true})` over it dies with `ENOTEMPTY`.
+- **So the package cannot repair itself.** Anything that clears its output directory
+  before rebuilding it fails in the *cleanup*, before it ever reaches the copy.
+- **The install still exits 0.** pnpm runs a postinstall only when it relinks that
+  package, so on a tree with intact links and damaged output it reports success in
+  seconds having repaired nothing. A green install is not evidence of a good tree.
 
-That is a cone-mode sparse checkout: files at the repo root are always present,
-the listed directories are materialised, everything else is left out. Check it
-with `git sparse-checkout list` inside the worktree. It also holds down the
-host-disk growth noted below.
+The fix is a preload that falls back to coreutils when the native call throws, wired
+in with `NODE_OPTIONS=--require` so it covers the package manager's own process and
+every postinstall it spawns:
 
-`sparsePaths` and `.worktreeinclude` do not conflict, because they act on
-different files. `sparsePaths` chooses which **tracked** directories get checked
-out; `.worktreeinclude` copies its **gitignored** files in regardless, creating a
-parent directory if the sparse set had excluded it. Such a directory then holds
-only the copied file, not the tracked content that was excluded, and `git status`
-stays clean because the copies are gitignored either way.
-
-**Installing dependencies is where the time actually goes.** Creating the
-worktree is cheap next to populating it. A dependency tree is tens of thousands
-of small files, and writing them through the bind mount is bound by per-file
-metadata round-trips, not by data. Creating 3,000 files from a warm cache
-measured 1.9 s on the bind mount against 0.02 s on the container's own
-filesystem, and switching from a copy to a hardlink clone barely moved it
-(2.3 s to 1.9 s). Scaled to a real `node_modules` of ~105,000 files that is
-roughly a minute, paid again for every worktree.
-
-So hardlinking is a disk win, not a speed win, here. The two levers that do pay:
-
-- **Check that the store is being linked from, not copied out of.** A store on a
-  different filesystem from the checkout cannot be hardlinked from at all, though
-  package managers differ in whether they notice: pnpm relocates its store onto
-  the project's filesystem by itself, so placement is usually already right.
-  Placement is not proof, though. The fallback to copying is silent, and it
-  happens on the bind mount even with the store correctly placed. Confirm with
-  link counts, where `1` means the file was copied:
-
-  ```bash
-  find node_modules -type f | head -100 | xargs stat -c %h | sort | uniq -c
-  ```
-
-  All `1` means force it, for pnpm with `package-import-method=hardlink`. Put
-  that in the guest's `~/.npmrc`, which `cc-home` persists, and not in the
-  project's tracked `.npmrc`: that file also reaches cloud builds, and unlike the
-  default `auto`, `hardlink` has no fallback and fails where `auto` would copy.
-  Expect it to reclaim duplicated gigabytes and, per the numbers above, very
-  little time.
-- **Move the install off the bind mount entirely**, by pointing the dependency
-  directory at a path on the container filesystem. That is where the 94x lives.
-  The trade is that the directory is then invisible to the Mac, so a host-side
-  IDE loses code resolution, and it persists in `cc-home` rather than being
-  reclaimed with the checkout. Worth it for a container-only workflow, not if you
-  edit in a host IDE.
-
-**Automate it so it is never a manual step.** `SessionStart` fires with `cwd`
-set to the worktree root, so one idempotent script bootstraps every worktree,
-including the ones subagents create. Note the split the hooks contract makes:
-`$CLAUDE_PROJECT_DIR` stays at the main checkout, so use it to locate the script,
-and read the worktree path from the event JSON on stdin.
-
-```json
-{
-  "hooks": {
-    "SessionStart": [
-      { "hooks": [ { "type": "command",
-        "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/bootstrap-worktree.sh" } ] }
-    ]
+```js
+fs.cpSync = function (src, dest, opts) {
+  try { return nativeCpSync.call(fs, src, dest, opts); }
+  catch (err) {
+    if (!(err && err.code === 'EACCES' && opts && opts.recursive)) throw err;
+    spawnSync('rm', ['-rf', dest]);   // only coreutils can clear the debris
+    spawnSync('cp', ['-R', src, dest], { stdio: 'inherit' });
   }
-}
+};
 ```
 
-Keying the work to the lockfile hash makes it a no-op on every session after the
-first, so the hook costs nothing once the worktree is warm:
+Patch `fs.rmSync` the same way or the tree can never repair itself, and gate the
+whole thing on `uname -s` = `Linux` so the host path is unchanged. Since the exit
+code cannot be trusted, have the bootstrap hook verify a real build output before it
+records success, and leave a marker when it does not, which the statusline reports as
+`deps FAILED`.
 
-```bash
-#!/usr/bin/env bash
-set -euo pipefail
-cwd="$(jq -r '.cwd // empty')"                    # the worktree, not $CLAUDE_PROJECT_DIR
-[ -n "${cwd}" ] || { echo "no .cwd in payload" >&2; exit 1; }
-lock="${cwd}/pnpm-lock.yaml"
-[ -f "${cwd}/package.json" ] && [ -f "${lock}" ] || exit 0   # not a checkout: fine
-sum="$(sha256sum "${lock}" | cut -d' ' -f1)"
-stamp="${cwd}/node_modules/.bootstrapped"
-[ -f "${stamp}" ] && [ "$(cat "${stamp}")" = "${sum}" ] && exit 0
-# A tree that predates the hook is adopted, not reinstalled. Both conditions matter:
-# drop the stamp test and a lockfile change stops triggering an install forever.
-if [ -d "${cwd}/node_modules" ] && [ ! -f "${stamp}" ]; then
-  printf '%s' "${sum}" > "${stamp}"; exit 0
-fi
-command -v pnpm >/dev/null 2>&1 || { echo "pnpm is not on PATH" >&2; exit 1; }
-( cd "${cwd}" && pnpm install --frozen-lockfile --prefer-offline ) >&2
-printf '%s' "${sum}" > "${stamp}"
-```
+Beware when testing this: a package manager that caches build output (pnpm's
+side-effects cache) hardlinks a previous success into a new worktree without running
+the script at all, so a "fresh worktree" check can pass having executed zero
+postinstalls. Force the cold path before believing a fix.
 
 Two smaller notes. New worktrees branch from `origin/HEAD`, so creating one
 fetches; under `CC_PROXY=on` that goes through tinyproxy with a five-second cap

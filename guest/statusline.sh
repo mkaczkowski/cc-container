@@ -115,6 +115,26 @@ location="$(basename "${cwd}")"
 [ -n "${branch}" ] && location="${location}${DIM}:${RST}${branch}"
 parts+=("${location}")
 
+# Inside the container every project is mounted at /workspace, and in a worktree the
+# directory is the worktree's own name, so the path alone never says which repo this is.
+# After a `ccdown && ccup` somewhere else that is genuinely confusing; the remote settles it.
+project="$(git -C "${cwd}" remote get-url origin 2>/dev/null | sed 's|.*[/:]||; s|\.git$||')"
+if [ -n "${project}" ] && [ "${project}" != "$(basename "${cwd}")" ]; then
+  parts+=("${DIM}in ${RST}${project}")
+fi
+
+# An async bootstrap hook touches this marker for as long as it is installing dependencies
+# (see the worktree section of the README). Hook stdout goes to Claude and hook stderr only
+# to the debug log, so this is the one place the user can see that wait.
+marker="/tmp/cc-bootstrap/$(printf '%s' "${cwd}" | sed 's|^/||; s|/|_|g')"
+if [ -f "${marker}" ]; then
+  parts+=("${YELLOW}deps installing...${RST}")
+elif [ -f "${cwd}/node_modules/.bootstrap-failed" ]; then
+  # A tree that is present but incomplete otherwise reads as healthy, because nothing is
+  # running and node_modules exists. The hook leaves this marker precisely for that case.
+  parts+=("${RED}deps FAILED${RST}")
+fi
+
 line=""
 for part in "${parts[@]}"; do
   [ -n "${line}" ] && line+="${SEP}"

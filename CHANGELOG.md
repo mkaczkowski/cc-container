@@ -54,3 +54,18 @@ First public release.
   millisecond-cheap synchronous hook emitting `additionalContext` so Claude does
   not build against an empty tree, and a marker file the statusline renders so the
   wait is visible to the user.
+- Statusline: show the mounted project, and a `deps installing...` indicator while a
+  bootstrap marker exists. Every project is `/workspace` in the guest and a worktree
+  shows its own name, so nothing on screen distinguished one repo from another after
+  recycling the session elsewhere. The project name comes from the git remote and is
+  shown only when it differs from the directory, so it stays quiet on the host.
+- Documented that Node 22's native recursive `fs.cpSync`/`fs.rmSync` fail on the
+  virtiofs bind mount (`EACCES`, then `ENOTEMPTY` over the debris they leave), which
+  breaks any postinstall that rebuilds a directory and leaves it unable to repair
+  itself. Covers the coreutils fallback preloaded via `NODE_OPTIONS`, why a green
+  `pnpm install` is not evidence the tree is intact, and the side-effects cache that
+  makes a "fresh worktree" test pass having run zero postinstalls.
+- Statusline also reports `deps FAILED`, since a tree that is present but incomplete
+  otherwise reads as healthy.
+- Removed a duplicated copy of the worktree section that had drifted out of sync: it
+  still carried the superseded advice to install synchronously from `SessionStart`.
