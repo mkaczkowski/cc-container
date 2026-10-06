@@ -59,6 +59,8 @@ First public release.
   checkout is written through the bind mount onto host disk. Includes how it
   composes with `.worktreeinclude`, which copies gitignored files in regardless
   of the sparse set.
+  Warns that a directory only the package manager reads (pnpm `patches/`) must
+  be in the sparse set too, or install fails with ENOENT on a tracked file.
 - Measured where worktree bootstrap time goes: writing a dependency tree through
   the bind mount is metadata-bound, 94x slower than the container filesystem for
   the same 3,000 files, and hardlinking saves disk rather than time. Documented

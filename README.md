@@ -199,6 +199,15 @@ parent directory if the sparse set had excluded it. Such a directory then holds
 only the copied file, not the tracked content that was excluded, and `git status`
 stays clean because the copies are gitignored either way.
 
+**Include every directory that install reads, not just the source you edit.**
+A tracked directory left out of the sparse set is not deleted, it is marked
+skip-worktree, so `git status` stays clean while the file is missing. The usual
+casualty is a root-level directory that only the package manager reads, such as
+pnpm's `patches/` (`pnpm.patchedDependencies`) or an in-repo `.yarn/` release:
+the SessionStart `pnpm install` then fails with `ENOENT` on a file that git
+swears is tracked. Spot it with `git ls-files -v | grep '^S'` inside the
+worktree; fix it with `git sparse-checkout add <dir>`.
+
 **Installing dependencies is where the time actually goes.** Creating the
 worktree is cheap next to populating it. A dependency tree is tens of thousands
 of small files, and writing them through the bind mount is bound by per-file
