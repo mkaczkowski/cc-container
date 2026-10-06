@@ -51,10 +51,20 @@ mac-sim maestro --tags functional         # a declared parameter, as a flag
 mac-sim maestro .maestro/flows/x.yaml     # ...or its one path parameter, bare
 mac-sim capture --help                    # the flags THIS command declares
 
-mac-sim lock                              # which checkout holds the simulator
-mac-sim release                           # hand it back
+mac-sim lock                              # who holds the simulator, and what
+                                           # is executing right now, if anything
+mac-sim release                           # hand back the claim (does not stop
+                                           # anything still running)
+mac-sim reset                             # force-stop a stuck command and
+                                           # actually free the lock; also
+                                           # `mac-sim release -f`
+mac-sim reset --pid 12345                 # only reset if that's still the pid
+                                           # `mac-sim lock` showed you
 mac-sim run -f                            # take it over from another checkout
 ```
+
+A refused command exits `75` (`EX_TEMPFAIL`), not the shim's normal failure
+exit code, so a script can tell "busy, try again" apart from "actually broken."
 
 Screenshots must be written under `/workspace` so they land in the bind mount
 and become readable in the container. That is how UI verification works: capture,
@@ -98,6 +108,23 @@ a command, plus a sticky owner record honoured for `lock.ttl` seconds afterwards
 checkout is answered 409 with who holds it and why, not silently run. Switching is
 legitimate, so this refuses rather than forbids: `-f` takes it over, `mac-sim
 release` hands it back, `mac-sim lock` reports it.
+
+These are two different things, and only telling one apart from the other matters
+when something goes wrong. The owner record is what `lock` reads and `release`
+clears -- a courtesy note, not an enforcement mechanism. The `flock` is what
+actually refuses a second command; it is held by the host thread running your
+command for exactly as long as that command runs, and it does **not** care
+whether the client that asked for it is still there. Killing a guest-side
+wrapper (or losing the container) does not touch it: the host-side subprocess it
+is waiting on keeps running, and the lock stays held until that subprocess exits
+or its own timeout does. `mac-sim release` in that situation clears the owner
+record and looks like it worked, but the flock is untouched, so the next command
+is still refused -- now unable to even name who holds it, because the record
+that would have said so is gone. **Use `mac-sim reset`** (or `release -f`)
+instead: it stops the tracked subprocess so the thread holding the flock
+finishes and releases it for real, and `mac-sim lock` reports live execution
+state (verb, pid, elapsed time) precisely so you can tell these two states
+apart before deciding which one to reach for.
 
 Read-only verbs never claim: `list`, `booted`, `runtimes`, `screenshot`, `logs`.
 A project command claims by default; declare `"exclusive": false` for one that
@@ -177,6 +204,12 @@ stops it, `cc-sim-log` tails it, and `ccst` shows whether it is listening.
 It cannot be started from inside the container: the guest has no way to spawn a
 host process, so something host-side has to launch it first. Startup is ~0.3 s
 (polled, not a fixed sleep) and it idles at ~24 MB.
+
+Unlike `guest/mac-sim` -- which is bind-mounted and re-read on every invocation,
+so a `git pull` reaches a running session on its next command -- `host/mac-sim-shim.py`
+is a long-running process. An edit to it needs `cc-sim-down && cc-sim-up` (or
+just `cc-sim-up` again) before it takes effect; the running process does not
+notice a changed file on disk.
 
 ## Teaching the agent it exists
 

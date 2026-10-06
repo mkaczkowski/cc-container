@@ -37,8 +37,11 @@ its own checkout root and the host resolves paths from there. Because one Mac ha
 one simulator, one installed bundle id and one bundler port, a checkout claims
 those while it uses them:
 
-  mac-sim lock                          # who holds the simulator
+  mac-sim lock                          # who holds the simulator, and what
+                                         # is executing right now, if anything
   mac-sim release                       # hand it back
+  mac-sim reset                         # force-stop a stuck command and free
+                                         # the lock (also: `mac-sim release -f`)
   mac-sim run -f                        # take it over from another checkout
 """
 
@@ -55,7 +58,14 @@ DEVICE = os.environ.get("MAC_SIM_DEVICE")
 
 BUILTINS = {"list", "booted", "runtimes", "boot", "shutdown", "gui", "install",
             "launch", "terminate", "uninstall", "openurl", "screenshot", "logs",
-            "build", "commands", "lock", "release"}
+            "build", "commands", "lock", "release", "reset"}
+
+# Distinct from a general host-command failure (which exits with the shim's own
+# exit_code, normally the exact status the failing command returned). A 409
+# ("another mac-sim command is running") is specifically retryable, so it gets
+# EX_TEMPFAIL rather than the generic 1: a caller scripting `mac-sim ... ; $?`
+# can tell "try again later" apart from "this is actually broken."
+EX_TEMPFAIL = 75
 
 # Options that consume the next argument. Needed to find the subcommand: without
 # it `mac-sim -d "iPhone 16" boot` reads the device name as the subcommand and
@@ -117,7 +127,8 @@ def request(method, payload=None, timeout=2500):
         except (ValueError, KeyError, TypeError):
             pass
         if exc.code == 409:
-            sys.exit(f"mac-sim: {detail}")
+            print(f"mac-sim: {detail}", file=sys.stderr)
+            sys.exit(EX_TEMPFAIL)
         sys.exit(f"mac-sim: shim rejected the request (HTTP {exc.code}): {detail}")
     except urllib.error.URLError as exc:
         sys.exit(UNREACHABLE.format(shim=SHIM, reason=exc.reason))
@@ -163,7 +174,14 @@ def print_commands(health):
         owner = project.get("owner")
         if owner:
             mine = " (this checkout)" if owner.get("workdir") == WORKDIR else ""
-            print(f"  simulator held by: {owner.get('workdir')}{mine}")
+            held_by = owner.get("guest_workdir") or owner.get("workdir")
+            print(f"  simulator held by: {held_by}{mine}")
+        executing = project.get("executing")
+        if executing:
+            mins, secs = divmod(int(executing.get("elapsed", 0)), 60)
+            print(f"  EXECUTING NOW: {executing.get('verb')!r} "
+                 f"(pid {executing.get('pid') or 'starting'}, {mins}m {secs}s) "
+                 f"-- `mac-sim reset` to force-stop it")
         defaults = project.get("defaults") or {}
         if defaults:
             print("  defaults: " + ", ".join(f"{k}={v}" for k, v in sorted(defaults.items())))
@@ -316,6 +334,12 @@ def main():
     for name in ("list", "booted", "runtimes", "boot", "shutdown", "gui",
                  "commands", "lock", "release"):
         add(name)
+    p = add("reset")
+    p.add_argument("--pid", type=int, default=None,
+                    help="only reset if this pid is still the one executing "
+                         "(from `mac-sim lock`); guards against killing an "
+                         "unrelated command that started after you looked. "
+                         "Omit to reset whatever is current.")
     p = add("install"); p.add_argument("app")
     for name in ("launch", "terminate", "uninstall"):
         p = add(name); p.add_argument("bundle_id", nargs="?")
@@ -362,9 +386,13 @@ def main():
     if a.cmd == "commands":
         return print_commands(request("GET", timeout=30))
 
-    if a.cmd in ("lock", "release"):
+    if a.cmd in ("lock", "release", "reset"):
         payload = {"verb": "lock", **scope}
-        if a.cmd == "release":
+        if a.cmd == "reset" or (a.cmd == "release" and a.force):
+            payload["action"] = "reset"
+            if getattr(a, "pid", None):
+                payload["pid"] = a.pid
+        elif a.cmd == "release":
             payload["action"] = "release"
         return emit(call(payload, timeout=30))
 

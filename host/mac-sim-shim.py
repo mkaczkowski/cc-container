@@ -32,6 +32,7 @@ import shlex
 import signal
 import subprocess
 import sys
+import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from ipaddress import ip_address, ip_network
@@ -398,20 +399,23 @@ def project_command(body, project, base):
 # Built-in verbs
 # --------------------------------------------------------------------------
 def build_command(verb, body, config):
-    """Resolve a request to (argv, timeout, extra).
+    """Resolve a request to (argv, timeout, extra, project).
 
     Every project-scoped verb is resolved from the caller's checkout rather than
-    the project root, and is tagged with the claim it needs.
+    the project root, and is tagged with the claim it needs. `project` is None
+    for the global verbs, otherwise the config entry the lock (if any) belongs
+    to -- callers need it to translate a host path back to the guest's own view.
     """
     if verb in GLOBAL_VERBS:
-        return dispatch(verb, body, None, None)
+        argv, timeout, extra = dispatch(verb, body, None, None)
+        return argv, timeout, extra, None
     project = config.project(body.get("project"))
     base = resolve_workdir(body, project)
     argv, timeout, extra = dispatch(verb, body, project, base)
     extra["workdir"] = str(base)
     if extra.pop("_exclusive", verb in EXCLUSIVE_BUILTINS) and config.lock_enabled:
         extra["_lock"] = project["name"]
-    return argv, timeout, extra
+    return argv, timeout, extra, project
 
 
 def dispatch(verb, body, project, base):
@@ -514,6 +518,18 @@ def dispatch(verb, body, project, base):
 #     inherits A's installed app.
 # Switching checkouts is legitimate, so this refuses rather than forbids: -f
 # takes the claim over, `mac-sim release` hands it back.
+#
+# The two mechanisms are visible and recoverable to different degrees. The
+# owner record is: `mac-sim lock` reads it, `mac-sim release` clears it. The
+# flock historically was not: nothing inspected it and nothing but the holder
+# finishing (or its process dying) ever released it, so a client that gave up
+# on a request already in flight on the host (a killed guest wrapper, a
+# force-killed session) left it held with no recovery path short of restarting
+# the shim. ACTIVE + kill_active() below close that gap: the currently-running
+# subprocess for a lock is tracked, `describe_owner()` reports it even when the
+# owner record has gone missing, and `mac-sim reset` kills it -- which lets the
+# holder's own thread finish and release the flock the normal way, rather than
+# reaching into another thread's file descriptor.
 def _owner_path(name):
     return LOCK_DIR / f"{name}.owner.json"
 
@@ -526,11 +542,14 @@ def read_owner(name):
         return None
 
 
-def write_owner(name, workdir, verb):
+def write_owner(name, workdir, verb, guest_workdir=None):
     LOCK_DIR.mkdir(parents=True, exist_ok=True)
     tmp = _owner_path(name).with_suffix(".tmp")
+    payload = {"workdir": str(workdir), "verb": verb, "at": time.time()}
+    if guest_workdir:
+        payload["guest_workdir"] = guest_workdir
     with open(tmp, "w") as fh:
-        json.dump({"workdir": str(workdir), "verb": verb, "at": time.time()}, fh)
+        json.dump(payload, fh)
     tmp.replace(_owner_path(name))  # atomic: a reader never sees a half-write
 
 
@@ -541,21 +560,129 @@ def clear_owner(name):
         pass
 
 
+def to_guest_path(project, host_path):
+    """Best-effort translation of a host-resolved checkout path back to what
+    the caller itself sees under its own bind mount, so a refusal or a `lock`
+    report names the path the guest can actually recognise (D7)."""
+    if project is None or host_path is None:
+        return None
+    try:
+        rel = Path(host_path).resolve().relative_to(project["root"])
+    except (ValueError, OSError, RuntimeError):
+        return None
+    mount = project["guest_mount"]
+    return mount if str(rel) == "." else f"{mount}/{rel}"
+
+
+# Which Claim currently holds each named lock, if any. This is what makes the
+# execution lock (the flock below) inspectable and recoverable at all: without
+# it, a stuck command is invisible to every guest-side verb, and `-f` cannot
+# reach it because it only ever touched the sticky owner record. Guarded by
+# _ACTIVE_LOCK because acquire/release run on the HTTP server's worker threads.
+_ACTIVE_LOCK = threading.Lock()
+ACTIVE = {}  # lock name -> Claim
+
+
 def describe_owner(name, ttl):
     owner = read_owner(name)
+    with _ACTIVE_LOCK:
+        claim = ACTIVE.get(name)
+    live = None
+    if claim is not None:
+        elapsed = int(time.time() - (claim.started or time.time()))
+        live = (f"  EXECUTING NOW: {claim.verb!r} (pid {claim.pid or 'starting'}), "
+                f"{elapsed // 60}m {elapsed % 60}s so far, from "
+                f"{claim.guest_workdir or claim.workdir}")
     if not owner:
-        return f"{name}: simulator free"
+        out = f"{name}: simulator free"
+        if live:
+            out += ("\n  (no claim on record, but a command is still running -- "
+                     "this is the stuck state; run `mac-sim reset` to recover)\n" + live)
+        return out
     age = int(time.time() - float(owner.get("at", 0)))
     stale = " (expired)" if age >= ttl else ""
-    return (f"{name}: simulator held by {owner.get('workdir')}{stale}\n"
-            f"  last command: {owner.get('verb')}, {age // 60}m {age % 60}s ago")
+    out = (f"{name}: simulator held by {owner.get('guest_workdir') or owner.get('workdir')}{stale}\n"
+           f"  last command: {owner.get('verb')}, {age // 60}m {age % 60}s ago")
+    if live:
+        out += "\n" + live
+    return out
+
+
+def _executing_info(name):
+    with _ACTIVE_LOCK:
+        claim = ACTIVE.get(name)
+    if claim is None:
+        return None
+    return {"verb": claim.verb, "pid": claim.pid,
+            "workdir": claim.guest_workdir or claim.workdir,
+            "elapsed": time.time() - (claim.started or time.time())}
+
+
+def kill_active(name, grace=3.0, expected_pid=None):
+    """Force-stop whatever is currently executing under `name`'s lock, if
+    anything. Killing the tracked subprocess (rather than trying to reach into
+    another thread's flock directly) lets that thread's own `finally:
+    claim.release()` run normally and unlock/close the fd -- the one code path
+    already known to release it correctly.
+
+    `expected_pid`, when given, guards against the TOCTOU race where the
+    command a caller saw via `mac-sim lock` has already finished and a new,
+    unrelated one has started under the same name by the time the reset
+    request lands: a mismatch is rejected rather than killing whatever is
+    there now. Omitting it keeps the old best-effort "kill whatever is
+    current" behaviour, for a caller that has not first checked.
+    """
+    with _ACTIVE_LOCK:
+        claim = ACTIVE.get(name)
+    if claim is None:
+        return None
+    if expected_pid is not None and claim.pid != expected_pid:
+        raise Rejected(
+            f"{name}: refusing to reset -- the running command is no longer "
+            f"pid {expected_pid} (now {claim.pid or 'starting'}, {claim.verb!r}, "
+            f"started {int(time.time() - (claim.started or time.time()))}s ago). "
+            f"Run `mac-sim lock` again and retry with that pid, or omit --pid "
+            f"to reset whatever is current.")
+    claim.aborted = True  # tell its own release() not to re-write the owner we're about to clear
+    info = {"verb": claim.verb, "pid": claim.pid,
+            "workdir": claim.workdir, "guest_workdir": claim.guest_workdir,
+            "elapsed": time.time() - (claim.started or time.time())}
+    pid = claim.pid
+    if pid:
+        # killpg, not kill: build/test tools fork children (xcodebuild, node,
+        # watchman, maestro's driver) started in their own session (see the
+        # Popen calls above), and a lone SIGKILL to the top pid would leave
+        # those running -- still touching the simulator or a shared port even
+        # after this call claims the lock is free.
+        try:
+            os.killpg(pid, signal.SIGTERM)
+        except (ProcessLookupError, PermissionError):
+            pid = None
+        deadline = time.time() + grace
+        while pid and time.time() < deadline:
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                pid = None
+                break
+            time.sleep(0.2)
+        if pid:
+            try:
+                os.killpg(pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
+    return info
 
 
 class Claim:
-    def __init__(self, name, workdir, verb, force, ttl):
+    def __init__(self, name, workdir, verb, force, ttl, guest_workdir=None):
         self.name, self.workdir = name, str(workdir)
+        self.guest_workdir = guest_workdir
         self.verb, self.force, self.ttl = verb, force, ttl
         self.fh = None
+        self.pid = None       # set once the tracked subprocess actually starts
+        self.started = None
+        self.aborted = False  # set by kill_active(): skip the owner rewrite on release
 
     def acquire(self):
         LOCK_DIR.mkdir(parents=True, exist_ok=True)
@@ -567,8 +694,10 @@ class Claim:
             self.fh = None
             owner = read_owner(self.name) or {}
             raise Busy(f"{self.name}: another mac-sim command is running right now "
-                       f"({owner.get('verb', '?')} from {owner.get('workdir', '?')}). "
-                       f"Wait for it to finish.")
+                       f"({owner.get('verb', '?')} from "
+                       f"{owner.get('guest_workdir') or owner.get('workdir', '?')}). "
+                       f"Wait for it to finish, or run `mac-sim reset` if you are sure "
+                       f"it is stuck.")
         owner = read_owner(self.name)
         if (owner and not self.force
                 and owner.get("workdir") != self.workdir
@@ -576,21 +705,28 @@ class Claim:
             self.release(record=False)
             age = int(time.time() - float(owner["at"]))
             raise Busy(
-                f"{self.name}: the simulator is held by {owner['workdir']}\n"
+                f"{self.name}: the simulator is held by "
+                f"{owner.get('guest_workdir') or owner['workdir']}\n"
                 f"  (last command {owner.get('verb')!r}, {age // 60}m ago)\n"
-                f"Running from {self.workdir} would overwrite that build: same "
-                f"bundle id, same device, same bundler port.\n"
+                f"Running from {self.guest_workdir or self.workdir} would overwrite that "
+                f"build: same bundle id, same device, same bundler port.\n"
                 f"Take it over with -f, or hand it back with `mac-sim release`.")
-        write_owner(self.name, self.workdir, self.verb)
+        write_owner(self.name, self.workdir, self.verb, self.guest_workdir)
+        self.started = time.time()
+        with _ACTIVE_LOCK:
+            ACTIVE[self.name] = self
         return self
 
     def release(self, record=True):
+        with _ACTIVE_LOCK:
+            if ACTIVE.get(self.name) is self:
+                del ACTIVE[self.name]
         if self.fh is None:
             return
-        if record:
+        if record and not self.aborted:
             # Refresh on the way out so the TTL measures idleness, not the age
             # of the first command in a session.
-            write_owner(self.name, self.workdir, self.verb)
+            write_owner(self.name, self.workdir, self.verb, self.guest_workdir)
         fcntl.flock(self.fh, fcntl.LOCK_UN)
         self.fh.close()
         self.fh = None
@@ -642,6 +778,7 @@ class Handler(BaseHTTPRequestHandler):
                 name: {
                     "root": str(p["root"]),
                     "owner": read_owner(name),
+                    "executing": _executing_info(name),
                     "guest_mount": p["guest_mount"],
                     "defaults": p["defaults"],
                     "commands": {
@@ -673,12 +810,13 @@ class Handler(BaseHTTPRequestHandler):
                 return self._reply(400, {"error": f"verb must be one of {BUILTIN_VERBS}"})
             if verb == "lock":
                 return self._lock_verb(body)
-            argv, timeout, extra = build_command(verb, body, self.config)
+            argv, timeout, extra, project = build_command(verb, body, self.config)
             lock_name = extra.pop("_lock", None)
             if lock_name:
-                claim = Claim(lock_name, extra.get("workdir"),
-                              body.get("command") or verb,
-                              bool(body.get("force")), self.config.lock_ttl)
+                workdir = extra.get("workdir")
+                claim = Claim(lock_name, workdir, body.get("command") or verb,
+                              bool(body.get("force")), self.config.lock_ttl,
+                              guest_workdir=to_guest_path(project, workdir))
                 claim.acquire()
         except Busy as exc:
             log(f"BUSY {client}: {exc}")
@@ -691,26 +829,42 @@ class Handler(BaseHTTPRequestHandler):
             return self._reply(400, {"error": f"{type(exc).__name__}: {exc}"})
 
         try:
-            self._execute(verb, body, argv, timeout, extra)
+            self._execute(verb, body, argv, timeout, extra, claim)
         finally:
             if claim:
                 claim.release()
 
     def _lock_verb(self, body):
-        """Inspect or hand back the claim. Never runs a subprocess."""
+        """Inspect, hand back, or force-clear the claim. Never runs a subprocess
+        itself -- `reset` stops the tracked subprocess of an in-flight command,
+        which is what actually frees the execution lock (see kill_active)."""
         project = self.config.project(body.get("project"))
         name = project["name"]
-        if body.get("action") == "release":
+        action = body.get("action")
+        if action in ("release", "reset"):
+            killed = kill_active(name, expected_pid=body.get("pid")) if action == "reset" else None
             clear_owner(name)
-            log(f"RELEASE {name}")
+            log(f"{'RESET' if action == 'reset' else 'RELEASE'} {name}"
+                + (f" (killed pid={killed.get('pid')} verb={killed['verb']!r})"
+                   if killed and killed.get("pid") else
+                   " (nothing was executing)" if action == "reset" else ""))
+            msg = f"{name}: simulator released"
+            if action == "reset":
+                if killed:
+                    elapsed = int(killed["elapsed"])
+                    msg += (f"\n  stopped a stuck {killed['verb']!r} "
+                            f"(pid {killed.get('pid') or '?'}, running "
+                            f"{elapsed // 60}m {elapsed % 60}s), started from "
+                            f"{killed.get('guest_workdir') or killed.get('workdir')}")
+                else:
+                    msg += "\n  nothing was executing; only the ownership claim was cleared"
             return self._reply(200, {"verb": "lock", "exit_code": 0,
-                                     "stdout": f"{name}: simulator released",
-                                     "stderr": ""})
+                                     "stdout": msg, "stderr": ""})
         return self._reply(200, {"verb": "lock", "exit_code": 0,
                                  "stdout": describe_owner(name, self.config.lock_ttl),
                                  "stderr": ""})
 
-    def _execute(self, verb, body, argv, timeout, extra):
+    def _execute(self, verb, body, argv, timeout, extra, claim=None):
         cwd = extra.pop("cwd", None)
         tail = extra.pop("tail", None)
         env = extra.pop("env", None)
@@ -729,8 +883,10 @@ class Handler(BaseHTTPRequestHandler):
             # with output to a log the caller can tail.
             try:
                 with open(logfile, "wb") as fh:
-                    subprocess.Popen(argv, cwd=cwd, env=env, stdout=fh,
-                                     stderr=subprocess.STDOUT, start_new_session=True)
+                    detached = subprocess.Popen(argv, cwd=cwd, env=env, stdout=fh,
+                                                stderr=subprocess.STDOUT, start_new_session=True)
+                if claim:
+                    claim.pid = detached.pid
             except OSError as exc:
                 log(f"FAIL {label}: {type(exc).__name__}: {exc}")
                 return self._reply(502, {
@@ -752,18 +908,48 @@ class Handler(BaseHTTPRequestHandler):
                 "log": logfile, **extra})
 
         try:
-            proc = subprocess.run(argv, capture_output=True, text=True,
-                                  timeout=timeout, cwd=cwd, env=env)
-        except subprocess.TimeoutExpired:
-            return self._reply(504, {"error": f"{label} timed out after {timeout}s"})
+            # A new session so a reset can kill the whole tree (os.killpg below),
+            # not just this one pid: build/test tools commonly fork children
+            # (xcodebuild, node, watchman, maestro's driver), and SIGKILL to only
+            # the top pid can leave those running, still touching the simulator
+            # or a shared port, even after reset claims the lock is free.
+            proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                    text=True, cwd=cwd, env=env, start_new_session=True)
         except OSError as exc:
             # A missing or unexecutable binary must come back as an error the
             # caller can read, not as a dead connection.
             log(f"FAIL {label}: {type(exc).__name__}: {exc}")
             return self._reply(502, {
                 "error": f"could not execute {argv[0]!r} on the host: {exc}"})
+        # Tracked on the claim so `mac-sim reset` can kill exactly this process
+        # (see kill_active) instead of leaving the lock unrecoverable once the
+        # caller that started it is gone.
+        if claim:
+            claim.pid = proc.pid
+        try:
+            stdout, stderr = proc.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            # Group-kill here too, not just from kill_active: a plain timeout
+            # (no reset involved) has exactly the same orphaned-children risk
+            # if only the top pid is signalled.
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                proc.kill()
+            try:
+                stdout, stderr = proc.communicate(timeout=5)
+            except Exception:
+                stdout, stderr = "", ""
+            if claim and claim.aborted:
+                log(f"RESET {label}: exit={proc.returncode}")
+                return self._reply(200, {
+                    "verb": verb,
+                    "exit_code": proc.returncode if proc.returncode is not None else 137,
+                    "stdout": "\n".join(stdout.splitlines()[-tail:]) if tail else stdout,
+                    "stderr": f"killed by `mac-sim reset`\n{stderr[-4_000:]}", **extra})
+            log(f"TIMEOUT {label} after {timeout}s")
+            return self._reply(504, {"error": f"{label} timed out after {timeout}s"})
 
-        stdout = proc.stdout
         if tail:
             stdout = "\n".join(stdout.splitlines()[-tail:])
         # Builds are noisy; keep the tail, which is where failures appear.
@@ -771,7 +957,7 @@ class Handler(BaseHTTPRequestHandler):
             stdout = stdout[-200_000:]
         log(f"DONE {label}: exit={proc.returncode}")
         self._reply(200, {"verb": verb, "exit_code": proc.returncode,
-                          "stdout": stdout, "stderr": proc.stderr[-40_000:], **extra})
+                          "stdout": stdout, "stderr": stderr[-40_000:], **extra})
 
 
 def main():
