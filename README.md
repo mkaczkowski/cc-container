@@ -625,6 +625,17 @@ cc-shell                                 # ...or a throwaway one, if none is up
 tail -f ~/.local/state/cc-container/*.log
 ```
 
+**`cc-sim-up: shim failed to start` with `Errno 49: Can't assign requested
+address` in the shim log.** The shim binds to the vmnet gateway
+(`192.168.64.1`), which only exists while a container is running. `cc-sim-up`
+now starts a short-lived `cc-bridge-probe` container to bring it up on a cold
+start and `cc-up` removes it once the session is running. If it still fails,
+check `ifconfig | grep 192.168.64` and `container network inspect default`.
+
+**`401 Unauthorized` from `registry-1.docker.io` on `cc-up`.** The
+`claude-code:local` image is missing (a runtime restart can empty the image
+store), so the runtime tried to pull it. Run `cc-container-build`.
+
 **A build fails with `no space left on device`.** The runtime's storage grows
 with every image and every container's scratch. `ccdown` reclaims the running
 session's share, which is usually the largest single piece. Deleting the base

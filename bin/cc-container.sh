@@ -270,6 +270,42 @@ _cc_sim_in_project() {
   return 1
 }
 
+# The shim binds to the vmnet gateway (192.168.64.1 by default). That address is
+# only assigned while a container is running (it vanishes shortly after the last
+# one stops), so on a cold start the bind fails with "Can't assign requested
+# address". Hold a tiny probe container open while the shim binds; cc-up drops it
+# once the session container has taken over keeping the bridge alive.
+CC_SIM_PROBE_NAME="${CC_SIM_PROBE_NAME:-cc-bridge-probe}"
+_cc_host_has_addr() { ifconfig 2>/dev/null | grep -q "inet $1 "; }
+
+_cc_sim_release_probe() {
+  container inspect "${CC_SIM_PROBE_NAME}" >/dev/null 2>&1 || return 0
+  container stop "${CC_SIM_PROBE_NAME}" >/dev/null 2>&1
+  container rm "${CC_SIM_PROBE_NAME}" >/dev/null 2>&1
+  return 0
+}
+
+_cc_sim_ensure_bridge() {
+  local host; host="$(_cc_sim_host)"
+  _cc_host_has_addr "${host}" && return 0
+  echo "cc-sim-up: ${host} is not assigned yet, starting a probe container to bring up the vmnet bridge..." >&2
+  _cc_sim_release_probe
+  if ! container run -d --name "${CC_SIM_PROBE_NAME}" --entrypoint /bin/sleep \
+         "${CC_CONTAINER_IMAGE}" infinity >/dev/null 2>&1; then
+    echo "cc-sim-up: could not start probe container ${CC_SIM_PROBE_NAME} from ${CC_CONTAINER_IMAGE}; run 'cc-container-build' if the image is missing" >&2
+    return 1
+  fi
+  local i
+  for i in $(seq 1 50); do
+    _cc_host_has_addr "${host}" && return 0
+    sleep 0.2
+  done
+  _cc_sim_release_probe
+  echo "cc-sim-up: ${host} is still not assigned after starting a container; the shim cannot bind to it." >&2
+  echo "  Check 'ifconfig | grep 192.168.64' and 'container network inspect default'." >&2
+  return 1
+}
+
 cc-sim-up() {
   if ! _cc_sim_configured; then
     echo "cc-sim-up: no config at ${CC_SIM_CONFIG}" >&2
@@ -279,6 +315,7 @@ cc-sim-up() {
   local port; port="$(_cc_sim_port)"
   [ -n "${port}" ] || { echo "cc-sim-up: cannot read listen.port from ${CC_SIM_CONFIG}" >&2; return 1; }
   _cc_listening "${port}" && return 0
+  _cc_sim_ensure_bridge || return 1
   # The token is shared by file, so the guest never has to be told a secret it
   # could log; it is generated once and reused across restarts.
   [ -s "${CC_SIM_TOKEN_FILE}" ] \
@@ -297,6 +334,7 @@ cc-sim-up() {
 
 cc-sim-down() {
   pkill -f "mac-sim-shim.py" 2>/dev/null && echo "stopped:  mac-sim shim"
+  _cc_sim_release_probe
   return 0
 }
 
@@ -428,6 +466,7 @@ cc-up() {
       --entrypoint /bin/bash \
       "${CC_CONTAINER_IMAGE}" -c 'sleep infinity' || return 1
   fi
+  _cc_sim_release_probe
   echo "${CC_SESSION_NAME} up, mounting ${PWD}. Attach with: cc-attach"
 }
 
