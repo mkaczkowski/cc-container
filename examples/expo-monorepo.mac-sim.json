@@ -39,16 +39,19 @@
       },
 
 
-      "//a": "The Android emulator (`mac-sim android ...`). A fixed console port",
-      "//a1": "fixes its adb serial (emulator-5560) and keeps it off the 5554 an",
-      "//a2": "emulator started by hand takes; -read-only lets both run one AVD.",
+      "//a": "Android emulators (`mac-sim android [-d tablet] ...`). A fixed console",
+      "//a1": "port fixes each one's adb serial (emulator-5560) and keeps it off the 5554",
+      "//a2": "an emulator started by hand takes; -read-only lets both run one AVD.",
       "android": {
         "sdk": "~/Library/Android/sdk",
         "java_home": "/Library/Java/JavaVirtualMachines/temurin-17.jdk/Contents/Home",
-        "avd": "Pixel_8_API_35",
-        "console_port": 5560,
         "port": 8097,
-        "emulator_args": ["-no-window", "-no-audio", "-read-only", "-no-boot-anim"]
+        "emulator_args": ["-no-window", "-no-audio", "-read-only", "-no-boot-anim"],
+        "default": "phone",
+        "devices": {
+          "phone":  { "avd": "Pixel_8_API_35", "console_port": 5560 },
+          "tablet": { "avd": "Pixel_Tablet_API_35", "console_port": 5572, "port": 8098 }
+        }
       },
 
       "commands": {

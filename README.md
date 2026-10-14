@@ -623,8 +623,8 @@ checkout you call from**, git worktrees included, and a checkout claims the
 simulator while it uses it, so two sessions cannot silently overwrite each
 other's build.
 
-The same bridge drives an **Android emulator** on the Mac (`mac-sim android
-boot | install | screenshot | ...`) for a project whose config declares an
+The same bridge drives **Android emulators** on the Mac (`mac-sim android
+[-d tablet] boot | install | screenshot | ...`) for a project whose config declares an
 `android` block: the emulator needs a hypervisor the guest does not have.
 
 Read [docs/MAC-SIM.md](docs/MAC-SIM.md) for the config format and

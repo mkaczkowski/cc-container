@@ -210,18 +210,25 @@ simulators booted, "the booted one" is no longer one device.
 
 The Android emulator needs a hypervisor the guest does not have, so it runs on
 the Mac as well, next to the SDK that builds for it. A project that declares an
-`android` block gets the same verbs against an emulator there:
+`android` block gets the same verbs against one or more emulators there:
 
 ```json
 "android": {
   "sdk": "/opt/homebrew/share/android-commandlinetools",
   "java_home": "/Library/Java/JavaVirtualMachines/temurin-17.jdk/Contents/Home",
-  "avd": "Pixel_8_API_35",
-  "console_port": 5560,
   "port": 8097,
-  "emulator_args": ["-no-window", "-no-audio", "-read-only", "-no-boot-anim"]
+  "emulator_args": ["-no-window", "-no-audio", "-read-only", "-no-boot-anim"],
+  "default": "phone",
+  "devices": {
+    "phone":  { "avd": "Pixel_8_API_35", "console_port": 5560 },
+    "tablet": { "avd": "Pixel_Tablet_API_35", "console_port": 5572, "port": 8098 }
+  }
 }
 ```
+
+A project with one emulator can put `avd` and `console_port` at the top level
+instead of `devices`. The fields outside `devices` (`port`, `emulator_args`) are
+the defaults each device can override.
 
 ```
 mac-sim android list                      # AVDs, and what adb has attached
@@ -237,19 +244,25 @@ mac-sim android status                    # emulator, claim, bundler, app; exit 
 mac-sim android lock | release | reset
 mac-sim android shutdown
 mac-sim android run --profile e2e         # any other word: the "android-run" command
+mac-sim android -d tablet boot            # every verb and command takes -d <device>
 ```
 
-- **One emulator per project, fixed by `console_port`.** Its adb serial is
+- **Each emulator is fixed by its `console_port`.** Its adb serial is
   `emulator-<console_port>`, and every adb call names it, so another device on
-  the Mac is never the one acted on. Pick a port other than 5554, which an
+  the Mac is never the one acted on. `-d <name>` (or `MAC_SIM_ANDROID_DEVICE`)
+  picks one; without it, `default` (the first declared, unless set). Pick a port other than 5554, which an
   emulator started by hand takes, and add `-read-only` to `emulator_args` if
   both may run the same AVD at once (it also means nothing installed survives a
   shutdown). The port must be even, in 5554..5682.
-- **Its own claim**, `<project>@android`, with the same rules as the simulator's.
-  An Android run never waits on an iOS one, or the other way around.
+- **Each has its own claim**: `<project>@android` for the default device,
+  `<project>@android-<name>` for another, with the same rules as the
+  simulator's. An Android run never waits on an iOS one, a phone run never on a
+  tablet one. A command's log on a non-default device is
+  `.mac-sim/logs/<command>@<name>.log`.
 - **`package`** defaults to `defaults.bundle_id`; set it when the two differ.
   **`port`** is the bundler port the Android commands get as `{port}`; give it
-  its own, so an iOS bundler and an Android one can both run.
+  its own, so an iOS bundler and an Android one can both run, and give a second
+  device its own too if both will run a dev build.
 - **`status`** reports whether the installed build is debuggable: a debug build
   is not ready without its bundler, a release build embeds its bundle.
 - `logs` takes `--lines` only (logcat has no time window here), and filters by
@@ -257,8 +270,8 @@ mac-sim android run --profile e2e         # any other word: the "android-run" co
 - Not for Android: `--sim`, `pull`, `build`, `runtimes`, `gui`.
 
 **Project commands** declare `"platform": "android"` to run there: they take the
-Android claim, get `{serial}`, `{avd}`, `{package}`, `{android_home}` and the
-Android `{port}`, and run with `ANDROID_HOME`, `JAVA_HOME` and the SDK's tools on
+claim of the device they target, get `{serial}`, `{avd}`, `{package}`,
+`{android_home}`, `{android_device}` (its name) and its `{port}`, and run with `ANDROID_HOME`, `JAVA_HOME` and the SDK's tools on
 `PATH`. `ready_app` waits for the app's process on the emulator. Name them
 `android-<word>` and the CLI reads `mac-sim android <word>` as that command, so
 `mac-sim android run --profile e2e` is `android-run`. A word that is also a

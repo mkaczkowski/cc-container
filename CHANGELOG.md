@@ -2,8 +2,9 @@
 
 ## Unreleased
 
-- `mac-sim android ...` drives an Android emulator on the Mac, for a project
-  that declares an `android` block in `mac-sim.json`: boot, install, launch
+- `mac-sim android ...` drives Android emulators on the Mac, for a project
+  that declares an `android` block in `mac-sim.json` (one emulator, or several
+  in `devices`, picked with `-d`): boot, install, launch
   (`--locale`), screenshot, openurl, appearance, logs, status, shutdown, under
   a claim of its own (`<project>@android`) so it never contends with the iOS
   simulator. A project command declared with `"platform": "android"` runs
