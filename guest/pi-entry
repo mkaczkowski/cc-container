@@ -1,0 +1,12 @@
+#!/bin/sh
+# Entrypoint for container pi sessions: the pi counterpart of cc-entry.
+#
+# Applies the declarative MCP server list (see cc-mcp-sync) and the global pi
+# config (see pi-config-sync) before handing off to pi, so a session started
+# with `pirun` picks up mcp-servers.json and pi config edits without a rebuild.
+# A sync failure is fatal, for the same reason as cc-entry.
+set -e
+[ "${CC_SUBSCRIPTION_ONLY:-0}" = "1" ] && /opt/cc-tools/cc-subscription-guard
+/opt/cc-tools/cc-mcp-sync
+/opt/cc-tools/pi-config-sync
+exec pi "$@"

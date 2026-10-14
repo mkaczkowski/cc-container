@@ -1,0 +1,138 @@
+#!/usr/bin/env python3
+"""Merge the declarative global pi config into pi's agent directory.
+
+The host directory ~/.config/cc-container/pi/ is mounted read-only at /opt/cc-pi
+(a directory, for the same reason as /opt/cc-mcp, see cc-mcp-sync).
+
+- settings.json: every top-level key it declares overwrites the same key in
+  ~/.pi/agent/settings.json, except "packages", which is merged: entries this
+  script added earlier are replaced, entries added by `pi install` are kept
+  unless the source declares the same package (matched without the version).
+  Keys dropped from the source are removed from the target. A sidecar records
+  what this script owns, as cc-mcp-sync does.
+- keybindings.json: symlinked into the agent dir, so edits on the Mac apply on
+  the next /reload. An existing regular file there is an error, not overwritten.
+- extensions/, prompts/ and skills/: referenced by absolute path from settings.json
+  ("/opt/cc-pi/extensions"), never copied.
+
+A missing /opt/cc-pi is the normal state for a container started without the
+mount and is a no-op.
+"""
+
+import json
+import os
+import sys
+import tempfile
+
+SOURCE_DIR = "/opt/cc-pi"
+AGENT_DIR = os.environ.get("PI_CODING_AGENT_DIR") or os.path.expanduser("~/.pi/agent")
+TARGET = os.path.join(AGENT_DIR, "settings.json")
+SIDECAR = os.path.expanduser("~/.cc-pi-managed.json")
+
+
+def fail(msg):
+    print(f"pi-config-sync: {msg}", file=sys.stderr)
+    sys.exit(1)
+
+
+def read_json(path, default):
+    if not os.path.exists(path):
+        return default
+    try:
+        with open(path) as fh:
+            return json.load(fh)
+    except (json.JSONDecodeError, OSError) as exc:
+        fail(f"cannot read {path}: {exc}")
+
+
+def write_json_atomic(path, data):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".pi-config-sync.")
+    try:
+        with os.fdopen(fd, "w") as fh:
+            json.dump(data, fh, indent=2)
+            fh.write("\n")
+        os.replace(tmp, path)
+    except OSError as exc:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+        fail(f"cannot write {path}: {exc}")
+
+
+def package_id(entry, where):
+    """Identity of a packages entry: its source without an npm version, so a
+    pinned "npm:x@1.2.3" replaces a hand-installed "npm:x" instead of loading twice."""
+    if isinstance(entry, dict) and isinstance(entry.get("source"), str):
+        entry = entry["source"]
+    if isinstance(entry, str):
+        if entry.startswith("npm:"):
+            name = entry[len("npm:"):]
+            # The version separator is the last "@" that is not a scope prefix.
+            at = name.rfind("@")
+            return "npm:" + (name[:at] if at > 0 else name)
+        return entry
+    fail(f"{where}: unsupported packages entry {entry!r} (expected a string or an object with 'source')")
+
+
+def sync_settings():
+    source_path = os.path.join(SOURCE_DIR, "settings.json")
+    source = read_json(source_path, None)
+    if source is None:
+        return
+    if not isinstance(source, dict):
+        fail(f"{source_path} must be a JSON object")
+    target = read_json(TARGET, {})
+    if not isinstance(target, dict):
+        fail(f"{TARGET} must be a JSON object")
+    managed = read_json(SIDECAR, {"keys": [], "packages": []})
+    if not isinstance(managed.get("keys"), list) or not isinstance(managed.get("packages"), list):
+        fail(f"{SIDECAR} is malformed: expected lists 'keys' and 'packages'. Delete it and retry.")
+
+    for key in set(managed["keys"]) - set(source):
+        target.pop(key, None)
+    for key, value in source.items():
+        if key != "packages":
+            target[key] = value
+
+    declared = source.get("packages", [])
+    if not isinstance(declared, list):
+        fail(f"{source_path}: 'packages' must be a list")
+    declared_ids = [package_id(p, source_path) for p in declared]
+    owned = set(managed["packages"]) | set(declared_ids)
+    kept = [p for p in target.get("packages", []) if package_id(p, TARGET) not in owned]
+    target["packages"] = declared + kept
+
+    write_json_atomic(TARGET, target)
+    write_json_atomic(SIDECAR, {"keys": sorted(k for k in source if k != "packages"), "packages": declared_ids})
+
+
+def sync_keybindings():
+    src = os.path.join(SOURCE_DIR, "keybindings.json")
+    dst = os.path.join(AGENT_DIR, "keybindings.json")
+    if os.path.islink(dst):
+        if os.readlink(dst) == src and os.path.exists(src):
+            return
+        # Ours but the source is gone, or pointing elsewhere: replace or drop it.
+        os.unlink(dst)
+    elif os.path.exists(dst):
+        if not os.path.exists(src):
+            return
+        fail(
+            f"{dst} is a regular file. Move its bindings into "
+            f"~/.config/cc-container/pi/keybindings.json on the Mac, delete {dst}, and retry."
+        )
+    if not os.path.exists(src):
+        return
+    os.makedirs(AGENT_DIR, exist_ok=True)
+    os.symlink(src, dst)
+
+
+def main():
+    if not os.path.isdir(SOURCE_DIR):
+        return
+    sync_settings()
+    sync_keybindings()
+
+
+if __name__ == "__main__":
+    main()

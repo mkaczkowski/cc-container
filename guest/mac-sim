@@ -11,10 +11,19 @@ Built-in simulator verbs work for any project:
   mac-sim list                          # available simulators
   mac-sim boot                          # default device; -d "iPhone 16" to change
   mac-sim install <path/to/App.app>
-  mac-sim launch [bundle.id]
+  mac-sim launch [bundle.id]            # --locale pl relaunches in that language
   mac-sim screenshot [out.png]          # must land inside the workspace
-  mac-sim logs --last 5m --lines 300
+  mac-sim logs --last 5m --lines 300     # the app's own process; --all for
+                                         # the whole simulator log
+  mac-sim status                         # device, claim, bundler (and the build
+                                         # profile it carries), app; exits 0
+                                         # only when the app is ready to drive
+  mac-sim pull <file> [out]             # copy a file out of the app's data
+                                         # container (a declared alias, or a path
+                                         # relative to it); a SQLite database
+                                         # arrives as one consistent snapshot
   mac-sim openurl myapp://
+  mac-sim appearance [light|dark]       # set, or print the current one
   mac-sim build                         # xcodebuild the project's workspace
 
 Project commands come from the host config (`mac-sim commands` lists them):
@@ -26,6 +35,11 @@ Project commands come from the host config (`mac-sim commands` lists them):
   mac-sim metro status                  # `<cmd> <sub>` -> the "metro-status" command
   mac-sim maestro --tags functional     # a declared parameter, as a flag
   mac-sim maestro .maestro/flows/x.yaml # ...or its one path parameter, bare
+
+A project command prints its output as the host produces it, and keeps a copy in
+.mac-sim/logs/<command>.log of the checkout; -q prints only the end. A command
+that leaves a server running (a bundler, or a build that goes on to serve the
+bundle) returns as soon as that server is ready and the app is up.
 
 A project command's own parameters are real flags, taken from the host config, so
 `mac-sim capture --help` lists what capture accepts. `--profile` names a variant
@@ -43,22 +57,34 @@ those while it uses them:
   mac-sim reset                         # force-stop a stuck command and free
                                          # the lock (also: `mac-sim release -f`)
   mac-sim run -f                        # take it over from another checkout
+
+A project that declares a "simulators" block can instead hand each checkout a
+private simulator, with a copy of the installed app, its own bundler port and
+its own claim, so two worktrees verify at the same time:
+
+  mac-sim sim create mine               # name it; defaults to the checkout's name
+  mac-sim --sim mine metro start        # every command takes --sim
+  mac-sim --sim mine screenshot
+  mac-sim sim list
+  mac-sim sim delete mine               # also stops its bundler
 """
 
 import argparse
 import json
 import os
 import sys
+import threading
 import urllib.error
 import urllib.request
 
 SHIM = os.environ.get("MAC_SIM_SHIM", "http://192.168.64.1:8890")
 TOKEN = os.environ.get("MAC_SIM_TOKEN", "")
 DEVICE = os.environ.get("MAC_SIM_DEVICE")
+SIM = os.environ.get("MAC_SIM_SIM")
 
 BUILTINS = {"list", "booted", "runtimes", "boot", "shutdown", "gui", "install",
-            "launch", "terminate", "uninstall", "openurl", "screenshot", "logs",
-            "build", "commands", "lock", "release", "reset"}
+            "launch", "terminate", "uninstall", "openurl", "appearance", "screenshot", "logs",
+            "build", "commands", "lock", "release", "reset", "sim", "pull", "status"}
 
 # Distinct from a general host-command failure (which exits with the shim's own
 # exit_code, normally the exact status the failing command returned). A 409
@@ -72,7 +98,18 @@ EX_TEMPFAIL = 75
 # forwards it to the host as an undeclared project command.
 VALUE_OPTS = {"-d", "--device", "-p", "--project", "-w", "--workdir",
               "-V", "--variant", "--arg", "--last", "--lines", "--predicate",
-              "--workspace", "--scheme", "--configuration"}
+              "--workspace", "--scheme", "--configuration", "--sim", "--locale",
+              "--pid"}
+
+# The host shim is a long-running process: an edit to it reaches nothing until
+# it is restarted, while this CLI is re-read on every call. So this file can be
+# newer than the shim it talks to.
+STALE_SHIM = ("the host shim is older than this CLI and does not support {what}.\n"
+              "On the Mac, restart it:  cc-sim-down && cc-sim-up")
+
+
+# The subset every command accepts, wherever it is written.
+COMMON_VALUE_OPTS = {"-d", "--device", "-p", "--project", "-w", "--workdir", "--sim"}
 
 
 def checkout_root(start=None):
@@ -104,7 +141,7 @@ UNREACHABLE = (
 )
 
 
-def request(method, payload=None, timeout=2500):
+def request(method, payload=None, timeout=3700):
     # The proxy (when there is one) is for outbound internet; the shim is a
     # direct host call and must not be proxied.
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
@@ -126,6 +163,9 @@ def request(method, payload=None, timeout=2500):
             detail = json.loads(detail)["error"]
         except (ValueError, KeyError, TypeError):
             pass
+        if exc.code == 400 and detail.startswith("verb must be one of"):
+            sys.exit("mac-sim: " + STALE_SHIM.format(
+                what=f"`{(payload or {}).get('verb')}`"))
         if exc.code == 409:
             print(f"mac-sim: {detail}", file=sys.stderr)
             sys.exit(EX_TEMPFAIL)
@@ -134,8 +174,64 @@ def request(method, payload=None, timeout=2500):
         sys.exit(UNREACHABLE.format(shim=SHIM, reason=exc.reason))
 
 
-def call(payload, timeout=2500):
+def call(payload, timeout=3700):
     return request("POST", payload, timeout)
+
+
+def log_signature(path):
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    return st.st_ino, st.st_size, st.st_mtime_ns
+
+
+def call_following(payload, log_path, follow):
+    """Send a long-running request and, meanwhile, copy the host's live log of it
+    to stdout. Returns (result, followed).
+
+    The host replaces the log when the command starts, so nothing is printed
+    until the file differs from what was there before the request: otherwise
+    the previous run's output would be replayed as this one's.
+    """
+    before = log_signature(log_path) if follow else None
+    box = {}
+
+    def post():
+        try:
+            box["result"] = call(payload)
+        except SystemExit as exc:
+            box["exit"] = exc
+
+    thread = threading.Thread(target=post, daemon=True)
+    thread.start()
+    log = None
+    while True:
+        thread.join(0.5)
+        finished = not thread.is_alive()
+        if follow and log is None and log_signature(log_path) not in (None, before):
+            log = open(log_path, "rb")
+        if log:
+            chunk = log.read()
+            if chunk:
+                sys.stdout.buffer.write(chunk)
+                sys.stdout.flush()
+        if finished:
+            break
+    if log:
+        log.close()
+    if "exit" in box:
+        raise box["exit"]
+    return box["result"], log is not None
+
+
+def require_feature(feature, what, health=None):
+    """Refuse to send a field an older shim would silently ignore: `--sim x`
+    dropped on the floor is a command run against the SHARED simulator."""
+    health = health or request("GET", timeout=30)
+    if feature not in health.get("features", []):
+        sys.exit("mac-sim: " + STALE_SHIM.format(what=what))
+    return health
 
 
 def emit(result, quiet_stdout=False):
@@ -182,6 +278,16 @@ def print_commands(health):
             print(f"  EXECUTING NOW: {executing.get('verb')!r} "
                  f"(pid {executing.get('pid') or 'starting'}, {mins}m {secs}s) "
                  f"-- `mac-sim reset` to force-stop it")
+            if executing.get("log"):
+                print(f"  live output: {executing['log']}")
+        sims = project.get("simulators")
+        if sims is not None:
+            print("  private simulators: " + (", ".join(
+                f"{sname} (port {entry.get('port')})" for sname, entry in sorted(sims.items()))
+                or "none yet (`mac-sim sim create <name>`)"))
+        if project.get("pull"):
+            print("  pull aliases: " + ", ".join(
+                f"{alias} ({path})" for alias, path in sorted(project["pull"].items())))
         defaults = project.get("defaults") or {}
         if defaults:
             print("  defaults: " + ", ".join(f"{k}={v}" for k, v in sorted(defaults.items())))
@@ -260,9 +366,20 @@ def resolve_command(commands, name, rest):
                      f"{', '.join(sorted(commands)) or 'none'}")
         return resolved, tail
 
+    # Options given before the command (`mac-sim --sim x metro status`) sit in
+    # front of the subcommand here; step over them to find it.
+    lead = 0
+    while lead < len(rest):
+        if rest[lead] in COMMON_VALUE_OPTS:
+            lead += 2
+        elif rest[lead] in ("-f", "--force"):
+            lead += 1
+        else:
+            break
+    head, rest = rest[:lead], rest[lead:]
     if not rest or rest[0].startswith("-"):
-        return known(name, rest)
-    sub_name, tail = rest[0], rest[1:]
+        return known(name, head + rest)
+    sub_name, tail = rest[0], head + rest[1:]
     if f"{name}-{sub_name}" in commands:
         return f"{name}-{sub_name}", tail
     if sub_name == "start" and name in commands:
@@ -290,6 +407,8 @@ def command_parser(name, spec, common):
     for param in sorted(params):
         pc.add_argument(f"--{param}", default=None, dest=f"param_{param}",
                         metavar=param.upper(), help="declared parameter")
+    pc.add_argument("-q", "--quiet", action="store_true",
+                    help="do not print the output as it is produced, only its end")
     # --profile is the variant, except where the command declares a parameter of
     # that name (a capture profile is a dataset, not a build flag).
     if "profile" not in params and variants:
@@ -302,7 +421,11 @@ def scope_of(a):
     """The fields every request carries: which project, which checkout, which
     device, and whether to take the simulator over."""
     scope = {}
-    if a.device:
+    if a.sim:
+        if a.device and a.device != DEVICE:
+            sys.exit("mac-sim: --sim names the device already; drop -d/--device")
+        scope["sim"] = a.sim
+    elif a.device:
         scope["device"] = a.device
     if a.project:
         scope["project"] = a.project
@@ -314,25 +437,38 @@ def scope_of(a):
 
 
 def main():
-    common = argparse.ArgumentParser(add_help=False)
-    common.add_argument("-d", "--device", default=DEVICE,
-                        help="simulator name (default: the project's)")
-    common.add_argument("-p", "--project", default=None,
-                        help="project name (only needed if several are configured)")
-    common.add_argument("-w", "--workdir", default=WORKDIR,
-                        help="checkout to act on (default: the one you are in)")
-    common.add_argument("-f", "--force", action="store_true",
-                        help="take the simulator over from another checkout")
+    def common_options(nested):
+        """The options every command takes. A nested parser must not carry
+        defaults: argparse lets a subparser's default overwrite the value the
+        parent parser already read, so `mac-sim --sim x boot` would lose its
+        --sim and boot the shared simulator instead."""
+        def default(value):
+            return argparse.SUPPRESS if nested else value
+        parser = argparse.ArgumentParser(add_help=False)
+        parser.add_argument("-d", "--device", default=default(DEVICE),
+                            help="simulator name (default: the project's)")
+        parser.add_argument("--sim", default=default(SIM), metavar="NAME",
+                            help="a private simulator from `mac-sim sim create` "
+                                 "(default: the shared one)")
+        parser.add_argument("-p", "--project", default=default(None),
+                            help="project name (only needed if several are configured)")
+        parser.add_argument("-w", "--workdir", default=default(WORKDIR),
+                            help="checkout to act on (default: the one you are in)")
+        parser.add_argument("-f", "--force", action="store_true", default=default(False),
+                            help="take the simulator over from another checkout")
+        return parser
+
+    common, nested = common_options(False), common_options(True)
     ap = argparse.ArgumentParser(
         prog="mac-sim", description=__doc__, parents=[common],
         formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     def add(name):
-        return sub.add_parser(name, parents=[common])
+        return sub.add_parser(name, parents=[nested])
 
     for name in ("list", "booted", "runtimes", "boot", "shutdown", "gui",
-                 "commands", "lock", "release"):
+                 "commands", "lock", "release", "status"):
         add(name)
     p = add("reset")
     p.add_argument("--pid", type=int, default=None,
@@ -343,12 +479,31 @@ def main():
     p = add("install"); p.add_argument("app")
     for name in ("launch", "terminate", "uninstall"):
         p = add(name); p.add_argument("bundle_id", nargs="?")
+        if name == "launch":
+            p.add_argument("--locale", default=None, metavar="LANG",
+                           help="relaunch the app in this language, e.g. pl or pl-PL")
+    p = add("pull")
+    p.add_argument("path", help="a pull alias the project declares, or a path "
+                                "relative to the app's data container")
+    p.add_argument("out", nargs="?", default=None,
+                   help="where to write it (default: .mac-sim/<file name>)")
+    p.add_argument("--bundle-id", default=None)
+    p = add("sim")
+    sims = p.add_subparsers(dest="sim_cmd", required=True)
+    sp = sims.add_parser("create", parents=[nested])
+    sp.add_argument("name", nargs="?", default=None,
+                    help="default: the checkout directory's name")
+    sp = sims.add_parser("delete", parents=[nested]); sp.add_argument("name")
+    sims.add_parser("list", parents=[nested])
     p = add("openurl"); p.add_argument("url")
+    p = add("appearance"); p.add_argument("mode", nargs="?", choices=["light", "dark"])
     p = add("screenshot"); p.add_argument("out", nargs="?", default=None)
     p = add("logs")
     p.add_argument("--last", default="2m")
     p.add_argument("--lines", type=int, default=200)
     p.add_argument("--predicate")
+    p.add_argument("--all", action="store_true",
+                   help="the whole simulator log, not only the app's process")
     p = add("build")
     p.add_argument("--workspace")
     p.add_argument("--scheme")
@@ -363,11 +518,13 @@ def main():
         # Drop the subcommand by position: dropping every argument equal to it
         # would also eat an option value that happened to match.
         rest = argv[:idx] + argv[idx + 1:]
-        commands = declared_commands(request("GET", timeout=30),
-                                     preflight_project(argv))
+        health = request("GET", timeout=30)
+        commands = declared_commands(health, preflight_project(argv))
         name, rest = resolve_command(commands, first, rest)
         pc, params = command_parser(name, commands.get(name, {}), common)
         a = pc.parse_args(rest)
+        if a.sim:
+            require_feature("sim", "--sim", health)
         args = dict(a.arg)
         args.update({p: v for p in params
                      if (v := getattr(a, f"param_{p}", None)) is not None})
@@ -375,13 +532,42 @@ def main():
                    "args": args, **scope_of(a)}
         if a.variant:
             payload["variant"] = a.variant
+        log_path = a.workdir and os.path.join(
+            a.workdir, ".mac-sim", "logs", f"{name}@{a.sim}.log" if a.sim else f"{name}.log")
         # These run for minutes; say which checkout is being built before the
         # wait starts, so a wrong-worktree call is caught then and not after.
         print(f"mac-sim {name}: {a.workdir or 'project root'}", file=sys.stderr)
-        return emit(call(payload))
+        result, followed = call_following(payload, log_path,
+                                          follow=bool(log_path) and not a.quiet)
+        if result.get("stdout_is_log") and a.quiet:
+            result["stdout"] = "\n".join(result["stdout"].splitlines()[-40:])
+        if result.get("log"):
+            print(f"mac-sim {name}: full output in {result['log']}", file=sys.stderr)
+        return emit(result, quiet_stdout=followed and result.get("stdout_is_log", False))
 
     a = ap.parse_args()
+
+    if a.cmd == "sim":
+        payload = {"verb": f"sim_{a.sim_cmd}"}
+        if a.project:
+            payload["project"] = a.project
+        if a.workdir:
+            payload["workdir"] = guest_abspath(a.workdir)
+        if a.force:
+            payload["force"] = True
+        if a.sim_cmd != "list":
+            name = a.name or os.path.basename(a.workdir or "")
+            if not name:
+                sys.exit("mac-sim sim: give the simulator a name")
+            payload["name"] = name
+        if a.sim_cmd == "create":
+            print(f"mac-sim sim create {payload['name']}: creating and booting a "
+                  f"simulator, about a minute", file=sys.stderr)
+        return emit(call(payload))
+
     scope = scope_of(a)
+    if "sim" in scope:
+        require_feature("sim", "--sim")
 
     if a.cmd == "commands":
         return print_commands(request("GET", timeout=30))
@@ -395,6 +581,10 @@ def main():
         elif a.cmd == "release":
             payload["action"] = "release"
         return emit(call(payload, timeout=30))
+
+    if a.cmd == "status":
+        res = emit(call({"verb": "status", **scope}, timeout=120))
+        sys.exit(0 if res.get("ready") else 1)
 
     if a.cmd in ("list", "booted", "runtimes"):
         res = call({"verb": a.cmd})
@@ -428,13 +618,46 @@ def main():
         payload = {"verb": a.cmd, **scope}
         if a.bundle_id:
             payload["bundle_id"] = a.bundle_id
+        locale = getattr(a, "locale", None)
+        if locale:
+            require_feature("locale", "launch --locale")
+            payload["locale"] = locale
         emit(call(payload))
-        print(f"{a.cmd}: {a.bundle_id or 'default bundle'}")
+        print(f"{a.cmd}: {a.bundle_id or 'default bundle'}"
+              + (f" (language {locale})" if locale else ""))
+        return
+
+    if a.cmd == "pull":
+        out = a.out
+        if not out:
+            # An alias names a file the host config knows; keep its real name.
+            aliases = {}
+            for project in request("GET", timeout=30).get("projects", {}).values():
+                aliases.update(project.get("pull") or {})
+            out = os.path.join(a.workdir or "/workspace", ".mac-sim",
+                               os.path.basename(aliases.get(a.path, a.path)))
+        out = guest_abspath(out)
+        payload = {"verb": "pull", "path": a.path, "out": out, **scope}
+        if a.bundle_id:
+            payload["bundle_id"] = a.bundle_id
+        res = emit(call(payload), quiet_stdout=True)
+        if not os.path.exists(out):
+            sys.exit(f"mac-sim: the host wrote {res.get('path')} but it is not "
+                     f"visible at {out}; is that path inside the bind mount?")
+        print(f"{out} ({os.path.getsize(out)} bytes)")
         return
 
     if a.cmd == "openurl":
         emit(call({"verb": "openurl", "url": a.url, **scope}))
         print(f"opened {a.url}")
+        return
+
+    if a.cmd == "appearance":
+        payload = {"verb": "appearance", **scope}
+        if a.mode:
+            payload["mode"] = a.mode
+        res = emit(call(payload), quiet_stdout=not a.mode)
+        print(f"appearance: {a.mode}" if a.mode else res["stdout"].strip())
         return
 
     if a.cmd == "screenshot":
@@ -452,6 +675,8 @@ def main():
         payload = {"verb": "logs", "last": a.last, "lines": a.lines, **scope}
         if a.predicate:
             payload["predicate"] = a.predicate
+        elif a.all:
+            payload["all"] = True
         return emit(call(payload))
 
     if a.cmd == "build":

@@ -68,6 +68,13 @@ CC_EXTRA_VOLUME_ARGS=(${CC_EXTRA_VOLUME_ARGS+"${CC_EXTRA_VOLUME_ARGS[@]}"})
 # opts out for one command or a whole shell.
 CC_SKIP_PERMISSIONS="${CC_SKIP_PERMISSIONS:-1}"
 
+# Subscription-only mode: 1 makes Claude Code (and pi-claude-bridge, which runs
+# through it) refuse anything but a Claude.ai subscription login, and refuses to
+# start pi while it holds or sees non-subscription credentials. Claude Code
+# enforces it from a managed policy mounted read-only at /etc/claude-code, so the
+# guest cannot edit it; guest/cc-subscription-guard checks the rest at start.
+CC_SUBSCRIPTION_ONLY="${CC_SUBSCRIPTION_ONLY:-0}"
+
 # Long-lived shared session (cc-up / cc-attach).
 CC_SESSION_NAME="${CC_SESSION_NAME:-cc-session}"
 
@@ -107,9 +114,11 @@ CC_SESSION_MEMORY="${CC_SESSION_MEMORY:-$(_cc_half_memory_gb)g}"
 CC_PROXY_URL="http://${CC_PROXY_HOST}:${CC_PROXY_PORT}"
 
 CC_MCP_DIR="${CC_MCP_DIR:-${CC_CONFIG_DIR}/mcp}"
+CC_PI_DIR="${CC_PI_DIR:-${CC_CONFIG_DIR}/pi}"
 CC_MCP_ENV_FILE="${CC_MCP_ENV_FILE:-${CC_CONFIG_DIR}/mcp.env}"
 CC_PROXY_PID_FILE="${CC_STATE_DIR}/tinyproxy.pid"
 CC_EGRESS_STATE="${CC_STATE_DIR}/egress"
+CC_IMAGE_VERSIONS="${CC_STATE_DIR}/image-versions"
 
 # ---------------------------------------------------------------------------
 # MCP servers
@@ -146,12 +155,46 @@ _cc_mcp_args() {
   done < "${CC_MCP_ENV_FILE}"
 }
 
+# ${CC_CONFIG_DIR}/pi/ holds the declarative global pi config (settings.json,
+# keybindings.json, extensions/, prompts/). Mounted as a DIRECTORY for the same
+# reason as the MCP list, and merged into ~/.pi/agent by guest/pi-config-sync.
+_cc_pi_args() {
+  [ -d "${CC_PI_DIR}" ] || return 0
+  printf '%s\0' --volume "${CC_PI_DIR}:/opt/cc-pi:ro"
+}
+
+# The policy is a DIRECTORY mount for the same reason as the MCP list.
+_cc_policy_collect() {
+  CC_POLICY_ARGS=()
+  case "${CC_SUBSCRIPTION_ONLY}" in
+    0) return 0 ;;
+    1) CC_POLICY_ARGS=(
+         --volume "${CC_CONTAINER_REPO}/policy/subscription-only:/etc/claude-code:ro"
+         --env CC_SUBSCRIPTION_ONLY=1
+       ) ;;
+    *) echo "cc-container: CC_SUBSCRIPTION_ONLY must be 0 or 1, got '${CC_SUBSCRIPTION_ONLY}'" >&2
+       return 1 ;;
+  esac
+}
+
+# Run the guard in the shared session before attaching an agent. It reads the
+# session's own policy mount, so a session started before CC_SUBSCRIPTION_ONLY=1
+# was set is refused rather than trusted.
+_cc_attach_guard() {
+  [ "${CC_SUBSCRIPTION_ONLY}" = "1" ] || return 0
+  container exec --env CC_SUBSCRIPTION_ONLY=1 "${CC_SESSION_NAME}" \
+    /opt/cc-tools/cc-subscription-guard
+}
+
 _cc_mcp_collect() {
   CC_MCP_ARGS=()
   local arg
   while IFS= read -r -d '' arg; do
     CC_MCP_ARGS+=("${arg}")
   done < <(_cc_mcp_args)
+  while IFS= read -r -d '' arg; do
+    CC_MCP_ARGS+=("${arg}")
+  done < <(_cc_pi_args)
 }
 
 # Emit --dangerously-skip-permissions unless disabled, already passed, or the
@@ -235,7 +278,15 @@ _cc_proxy_env() {
   printf '%s\0' --env "https_proxy=${CC_PROXY_URL}"
   printf '%s\0' --env "HTTP_PROXY=${CC_PROXY_URL}"
   printf '%s\0' --env "HTTPS_PROXY=${CC_PROXY_URL}"
-  printf '%s\0' --env "no_proxy=localhost,127.0.0.1"
+  # The host bridge address stays direct: guest -> host TCP works, and the
+  # mac-sim shim there is plain HTTP on a port the proxy does not CONNECT to.
+  printf '%s\0' --env "no_proxy=localhost,127.0.0.1,${CC_PROXY_HOST}"
+  printf '%s\0' --env "NO_PROXY=localhost,127.0.0.1,${CC_PROXY_HOST}"
+  # Node's built-in fetch/http/https ignore the variables above unless asked.
+  # The flag logs an "experimental" warning from every node process, which
+  # would land in every tool's stderr, so that one warning is silenced.
+  printf '%s\0' --env "NODE_USE_ENV_PROXY=1"
+  printf '%s\0' --env "NODE_OPTIONS=--disable-warning=UNDICI-EHPA"
 }
 
 _cc_proxy_collect() {
@@ -295,8 +346,8 @@ _cc_sim_ensure_bridge() {
     echo "cc-sim-up: could not start probe container ${CC_SIM_PROBE_NAME} from ${CC_CONTAINER_IMAGE}; run 'cc-container-build' if the image is missing" >&2
     return 1
   fi
-  local i
-  for i in $(seq 1 50); do
+  local _
+  for _ in $(seq 1 50); do
     _cc_host_has_addr "${host}" && return 0
     sleep 0.2
   done
@@ -322,8 +373,8 @@ cc-sim-up() {
     || (umask 077; head -c 32 /dev/urandom | xxd -p -c 64 > "${CC_SIM_TOKEN_FILE}")
   MAC_SIM_CONFIG="${CC_SIM_CONFIG}" MAC_SIM_TOKEN_FILE="${CC_SIM_TOKEN_FILE}" \
     python3 "${CC_CONTAINER_REPO}/host/mac-sim-shim.py" >"${CC_SIM_LOG}" 2>&1 &
-  local i
-  for i in $(seq 1 30); do
+  local _
+  for _ in $(seq 1 30); do
     _cc_listening "${port}" && break
     sleep 0.1
   done
@@ -382,20 +433,27 @@ _cc_call_hook() {
 # ---------------------------------------------------------------------------
 _cc_run() {
   local entrypoint_args=() default_flags=()
-  if [ "$1" = "--shell" ]; then
-    shift
-    entrypoint_args=(--entrypoint /bin/bash)
-  else
-    # cc-entry syncs the MCP server list, then execs claude with these args.
-    entrypoint_args=(--entrypoint /opt/cc-tools/cc-entry)
-    local flag; flag="$(_cc_default_flags "$@")"
-    [ -n "${flag}" ] && default_flags=("${flag}")
-  fi
+  case "$1" in
+    --shell)
+      shift
+      entrypoint_args=(--entrypoint /bin/bash) ;;
+    --pi)
+      # pi never asks before a tool call, so it needs no counterpart of
+      # --dangerously-skip-permissions: the VM is already its only boundary.
+      shift
+      entrypoint_args=(--entrypoint /opt/cc-tools/pi-entry) ;;
+    *)
+      # cc-entry syncs the MCP server list, then execs claude with these args.
+      entrypoint_args=(--entrypoint /opt/cc-tools/cc-entry)
+      local flag; flag="$(_cc_default_flags "$@")"
+      [ -n "${flag}" ] && default_flags=("${flag}") ;;
+  esac
   cc-runtime-up || return 1
   _cc_proxy_collect || return 1
   _cc_sim_auto_up || return 1
   _cc_call_hook "${CC_PRE_RUN_HOOK}" CC_PRE_RUN_HOOK || return 1
   _cc_mcp_collect
+  _cc_policy_collect || return 1
   # -it needs a real TTY; fall back for piped/scripted use (e.g. claude -p).
   local tty_args=()
   if [ -t 0 ] && [ -t 1 ]; then tty_args=(-it); fi
@@ -408,6 +466,7 @@ _cc_run() {
     ${CC_EXTRA_RUN_ARGS+"${CC_EXTRA_RUN_ARGS[@]}"} \
     ${CC_SIM_RUN_ARGS+"${CC_SIM_RUN_ARGS[@]}"} \
     ${CC_PROXY_ARGS+"${CC_PROXY_ARGS[@]}"} \
+    ${CC_POLICY_ARGS+"${CC_POLICY_ARGS[@]}"} \
     --workdir /workspace \
     --dns 8.8.8.8 \
     --env TERM \
@@ -417,6 +476,7 @@ _cc_run() {
 
 cc-container() { _cc_run "$@"; }
 cc-shell()     { _cc_run --shell "$@"; }
+pi-container() { _cc_run --pi "$@"; }
 
 # ---------------------------------------------------------------------------
 # Multi-session mode
@@ -427,7 +487,7 @@ cc-shell()     { _cc_run --shell "$@"; }
 # attach to it from as many terminals as you like.
 #
 #   cc-up            # once, from the project directory
-#   cc-attach        # in each terminal window
+#   cc-attach        # in each terminal window (pi-attach for pi)
 #   cc-down          # when finished
 # ---------------------------------------------------------------------------
 _cc_session_state() {
@@ -441,6 +501,7 @@ cc-up() {
   _cc_sim_auto_up || return 1
   _cc_call_hook "${CC_PRE_RUN_HOOK}" CC_PRE_RUN_HOOK || return 1
   _cc_mcp_collect
+  _cc_policy_collect || return 1
   local state; state="$(_cc_session_state)"
   if [ "${state}" = "running" ]; then
     echo "${CC_SESSION_NAME} already running. Attach with: cc-attach"
@@ -461,6 +522,7 @@ cc-up() {
       ${CC_EXTRA_RUN_ARGS+"${CC_EXTRA_RUN_ARGS[@]}"} \
     ${CC_SIM_RUN_ARGS+"${CC_SIM_RUN_ARGS[@]}"} \
       ${CC_PROXY_ARGS+"${CC_PROXY_ARGS[@]}"} \
+      ${CC_POLICY_ARGS+"${CC_POLICY_ARGS[@]}"} \
       --workdir /workspace \
       --dns 8.8.8.8 \
       --entrypoint /bin/bash \
@@ -483,9 +545,32 @@ cc-attach() {
   # Re-apply the MCP list on every attach, not just at cc-up: the shared
   # container is long-lived, so this is where an mcp-servers.json edit lands.
   # The mount is fixed at cc-up, so a NEW ${VAR} still needs cc-down && cc-up.
+  _cc_attach_guard || return 1
   container exec "${CC_SESSION_NAME}" /opt/cc-tools/cc-mcp-sync || return 1
   container exec "${tty_args[@]}" --env TERM --workdir /workspace \
     "${CC_SESSION_NAME}" claude ${default_flags+"${default_flags[@]}"} "$@"
+}
+
+# The pi counterpart of cc-attach. Both agents share the container and the
+# cc-home volume, so pi's state lives in /root/.pi/agent beside ~/.claude.
+pi-attach() {
+  if [ "$(_cc_session_state)" != "running" ]; then
+    echo "pi-attach: ${CC_SESSION_NAME} is not running. Start it with cc-up." >&2
+    return 1
+  fi
+  local tty_args=()
+  if [ -t 0 ] && [ -t 1 ]; then tty_args=(-it); fi
+  _cc_attach_guard || return 1
+  container exec "${CC_SESSION_NAME}" /opt/cc-tools/cc-mcp-sync || return 1
+  container exec "${CC_SESSION_NAME}" /opt/cc-tools/pi-config-sync || return 1
+  # -C <dir> starts pi in a subdirectory of /workspace, e.g. a worktree.
+  local workdir=/workspace
+  if [ "${1:-}" = "-C" ]; then
+    workdir="/workspace/${2:?pi-attach: -C needs a directory relative to the project root}"
+    shift 2
+  fi
+  container exec "${tty_args[@]}" --env TERM --workdir "${workdir}" \
+    "${CC_SESSION_NAME}" pi "$@"
 }
 
 cc-attach-shell() {
@@ -564,7 +649,7 @@ cc-status() {
   IFS="$(printf '\t')" read -r state cpus mem mount <<< "${info}"
   echo "session:  ${CC_SESSION_NAME} ${state} | ${cpus} cpus, ${mem} GB"
   echo "mount:    ${mount}"
-  if [ "${state}" = "running" ]; then echo "attach:   ccx"; else echo "start:    ccup   (restarts it)"; fi
+  if [ "${state}" = "running" ]; then echo "attach:   ccx (Claude Code), pix (pi)"; else echo "start:    ccup   (restarts it)"; fi
 }
 
 # ---------------------------------------------------------------------------
@@ -594,6 +679,14 @@ cc-doctor() {
 
   if container image list 2>/dev/null | grep -q "${CC_CONTAINER_IMAGE%%:*}"; then
     _p "image" "${CC_CONTAINER_IMAGE} present"
+    local versions
+    versions="$(container run --rm --entrypoint /bin/sh "${CC_CONTAINER_IMAGE}" -c \
+      'claude --version | cut -d" " -f1; pi --version 2>/dev/null || echo none' 2>/dev/null)"
+    _p "claude code" "$(echo "${versions}" | sed -n 1p)"
+    case "$(echo "${versions}" | sed -n 2p)" in
+      none|'') _p "pi" "not in image - run: cc-container-build" ;;
+      *) _p "pi" "$(echo "${versions}" | sed -n 2p)" ;;
+    esac
   else
     _p "image" "MISSING - run: cc-container-build"; ok=1
   fi
@@ -637,8 +730,17 @@ cc-doctor() {
 # ---------------------------------------------------------------------------
 # Image build / upgrade
 # ---------------------------------------------------------------------------
-# Build the image. Pass a Claude Code version to pin it, e.g.
+# Build the image. Pass a Claude Code version, a pi version, or both to pin
+# them; an empty argument keeps that agent's previous version, e.g.
 #   cc-container-build 2.1.220
+#   cc-container-build "" 1.2.0
+#   cc-container-build latest latest    # back to unpinned
+#
+# The versions of the last successful build are saved in ${CC_IMAGE_VERSIONS}
+# and reused for any argument left empty. Without that, upgrading one agent would
+# rebuild with the other's default ("latest"), silently dropping its pin. The
+# versions are the npm install layers' cache keys, so passing the same value
+# again replays the cached layer rather than reinstalling.
 #
 # If ~/.config/cc-container/Dockerfile.local exists, the repo image is built as
 # <name>:base and your file is built on top of it as the real image. That is the
@@ -651,11 +753,26 @@ cc-doctor() {
 #   RUN npm install -g @some/mcp-server
 #
 # Its build context is the config directory, so it can COPY files from there.
+_cc_saved_version() {
+  [ -r "${CC_IMAGE_VERSIONS}" ] || return 0
+  sed -n "s/^$1=//p" "${CC_IMAGE_VERSIONS}" | tail -1
+}
+
+_cc_save_versions() {
+  { [ -n "$1" ] && echo "CC_VERSION=$1"
+    [ -n "$2" ] && echo "PI_VERSION=$2"
+  } > "${CC_IMAGE_VERSIONS}" \
+    || { echo "cc-container-build: could not write ${CC_IMAGE_VERSIONS}" >&2; return 1; }
+}
+
 cc-container-build() {
   cc-runtime-up || return 1
   _cc_proxy_collect || return 1
+  local cc_version="${1:-$(_cc_saved_version CC_VERSION)}"
+  local pi_version="${2:-$(_cc_saved_version PI_VERSION)}"
   local args=()
-  [ -n "$1" ] && args=(--build-arg "CC_VERSION=$1")
+  [ -n "${cc_version}" ] && args+=(--build-arg "CC_VERSION=${cc_version}")
+  [ -n "${pi_version}" ] && args+=(--build-arg "PI_VERSION=${pi_version}")
   if _cc_proxy_wanted; then
     args+=(--build-arg "http_proxy=${CC_PROXY_URL}" --build-arg "https_proxy=${CC_PROXY_URL}"
            --build-arg "HTTP_PROXY=${CC_PROXY_URL}" --build-arg "HTTPS_PROXY=${CC_PROXY_URL}")
@@ -663,13 +780,17 @@ cc-container-build() {
   local overlay="${CC_CONFIG_DIR}/Dockerfile.local"
   if [ ! -r "${overlay}" ]; then
     container build ${args+"${args[@]}"} \
-      -t "${CC_CONTAINER_IMAGE}" "${CC_CONTAINER_REPO}/image"
+      -t "${CC_CONTAINER_IMAGE}" "${CC_CONTAINER_REPO}/image" || return 1
+    _cc_save_versions "${cc_version}" "${pi_version}"
     return
   fi
   local base="${CC_CONTAINER_IMAGE%%:*}:base"
   echo "Building ${base} from the repo Dockerfile..."
   container build ${args+"${args[@]}"} \
     -t "${base}" "${CC_CONTAINER_REPO}/image" || return 1
+  # The versions live in the base's layers, so they are recorded once it builds,
+  # even if the overlay below then fails.
+  _cc_save_versions "${cc_version}" "${pi_version}"
   echo "Applying ${overlay} on top, as ${CC_CONTAINER_IMAGE}..."
   container build ${args+"${args[@]}"} --build-arg "BASE_IMAGE=${base}" \
     -f "${overlay}" -t "${CC_CONTAINER_IMAGE}" "${CC_CONFIG_DIR}"
@@ -749,23 +870,45 @@ ccupd() { cc-update "$@"; }
 # install sits in a cached layer and replays the old version. Resolving the
 # latest version and passing it as --build-arg changes that layer's cache key,
 # forcing a real reinstall while leaving the apt layers cached.
+#
+# Resolved inside the guest rather than on the host, so the answer comes over the
+# same network path (and proxy) the build will use.
+_cc_latest_npm_version() {
+  local version
+  version="$(container run --rm --dns 8.8.8.8 \
+    ${CC_PROXY_ARGS+"${CC_PROXY_ARGS[@]}"} \
+    --entrypoint /bin/bash "${CC_CONTAINER_IMAGE}" \
+    -c "npm view '$1' version 2>/dev/null | tail -1" | tr -d '\r\n')"
+  if [ -z "${version}" ]; then
+    echo "cc-container: could not resolve the latest version of $1 (no egress? run cc-doctor)" >&2
+    return 1
+  fi
+  echo "${version}"
+}
+
 cc-container-upgrade() {
   cc-runtime-up || return 1
   _cc_proxy_collect || return 1
   local target="$1"
   if [ -z "${target}" ]; then
     echo "Resolving latest @anthropic-ai/claude-code..."
-    target="$(container run --rm --dns 8.8.8.8 \
-      ${CC_PROXY_ARGS+"${CC_PROXY_ARGS[@]}"} \
-      --entrypoint /bin/bash "${CC_CONTAINER_IMAGE}" \
-      -c 'npm view @anthropic-ai/claude-code version 2>/dev/null | tail -1' | tr -d '\r\n')"
-    if [ -z "${target}" ]; then
-      echo "cc-container-upgrade: could not resolve the latest version (no egress? run cc-doctor)" >&2
-      return 1
-    fi
+    target="$(_cc_latest_npm_version @anthropic-ai/claude-code)" || return 1
   fi
   echo "Building ${CC_CONTAINER_IMAGE} with Claude Code ${target}..."
   cc-container-build "${target}"
+}
+
+# Upgrade pi in the image, by the same cache-key mechanism as above.
+pi-container-upgrade() {
+  cc-runtime-up || return 1
+  _cc_proxy_collect || return 1
+  local target="$1"
+  if [ -z "${target}" ]; then
+    echo "Resolving latest @earendil-works/pi-coding-agent..."
+    target="$(_cc_latest_npm_version @earendil-works/pi-coding-agent)" || return 1
+  fi
+  echo "Building ${CC_CONTAINER_IMAGE} with pi ${target}..."
+  cc-container-build "" "${target}"
 }
 
 # Short names. Functions rather than aliases so they work in non-interactive
@@ -777,3 +920,5 @@ ccdown() { cc-down "$@"; }
 ccst()   { cc-status "$@"; }
 ccrun()  { cc-container "$@"; }
 ccsh()   { cc-shell "$@"; }
+pix()    { pi-attach "$@"; }
+pirun()  { pi-container "$@"; }

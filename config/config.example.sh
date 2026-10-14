@@ -34,6 +34,11 @@
 # CC_SKIP_PERMISSIONS=1
 # Name of the long-lived shared container used by cc-up / cc-attach.
 # CC_SESSION_NAME=cc-session
+# 1 allows only a Claude.ai subscription login: Claude Code (and pi through
+# pi-claude-bridge) refuses API keys, Console logins, Bedrock and Vertex, and pi
+# refuses to start while it sees such credentials. Recycle a running session
+# (cc-down && cc-up) after changing it. See README "Subscription-only mode".
+# CC_SUBSCRIPTION_ONLY=0
 
 # --- adding tools to the image ----------------------------------------------
 # Put a Dockerfile.local next to this file to layer your own tools on top of the

@@ -56,16 +56,23 @@ either way with `CC_PROXY=on` / `CC_PROXY=off`.
 ## Consequences of running behind the proxy
 
 Anything that hard-codes a direct connection and ignores `http_proxy` /
-`https_proxy` will fail. `curl`, `wget`, `git`, `npm`, `yarn`, `pnpm`, `gh` and
-Claude Code itself all honour it.
+`https_proxy` will fail. `curl`, `wget`, `git`, `npm`, `yarn`, `pnpm`, `gh`,
+Claude Code and pi all honour it.
 
-**Node's global `fetch` does not.** A stdio MCP server written against bare
-`fetch` will start, list its tools, and then fail every call that touches the
-network. Node 22.23+ accepts `NODE_USE_ENV_PROXY=1`; set it per server:
+**Node's built-in `fetch`, `http` and `https` do not** on their own, so the
+container also sets `NODE_USE_ENV_PROXY=1` (Node 22.21+), plus
+`NODE_OPTIONS=--disable-warning=UNDICI-EHPA` to keep the flag's "experimental"
+warning out of every node process's stderr. A project script that sets its own
+`NODE_OPTIONS` replaces that value and brings the warning back, harmlessly.
+Node tunnels plain HTTP with `CONNECT` as well, which is why the shipped
+`tinyproxy.conf` allows `ConnectPort 80`; an older copy in
+`~/.config/cc-container/` needs that line added by hand.
 
-```json
-"env": { "NODE_USE_ENV_PROXY": "1" }
-```
+`no_proxy` covers `localhost`, `127.0.0.1` and the host bridge address, so the
+mac-sim shim is always reached directly.
+
+SSH has no route: the guest has no DNS and `ssh` ignores the proxy variables.
+Use HTTPS remotes (`gh` and git credentials work through the proxy).
 
 If your NAT is ever fixed, set `CC_PROXY=off` and nothing else changes; no other
 part of the tool depends on the proxy.

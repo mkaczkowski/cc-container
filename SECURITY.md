@@ -46,6 +46,14 @@ with a threat model, not as a convenience script:
   address rather than `0.0.0.0`.
 - **Bound everything**: body size, output size, and a timeout per verb. Log
   every accepted and rejected call.
+- **Write into the bind mount as carefully as you read from it.** `mac-sim`
+  writes each command's log into the checkout, a directory the guest controls.
+  The path is resolved and checked for containment first, and the file is
+  created with `O_EXCL | O_NOFOLLOW`, so a symlink planted there is refused
+  rather than followed onto a host file.
+- **Let it destroy only what it created.** `mac-sim` can create and delete
+  simulators, but deletes only those in its own registry, caps how many exist,
+  and leaves the feature off until the config declares it.
 
 Even done well, the residual risk is real: if a bridged command is something like
 `npm test`, and the agent can edit that project's `package.json`, then the agent
@@ -81,6 +89,13 @@ direct egress.
   `~/.claude.json`, so they live in that volume in plaintext, and
   `claude mcp list` prints them in full. `mcp.env` keeps them out of a file you
   might commit — it does not keep them out of the container.
+  pi is no different: its `/login` writes `/root/.pi/agent/auth.json`, and the
+  same MCP keys are written into `/root/.pi/agent/mcp.json`, both in `cc-home`.
+- **Billing is not restricted by default.** Whatever credentials you pass in
+  are used. `CC_SUBSCRIPTION_ONLY=1` limits both agents to a Claude.ai
+  subscription (see README "Subscription-only mode"). It checks pi only when a
+  session starts, so an agent that exports a key and runs pi from a shell
+  mid-session is not caught; Claude Code's managed policy holds throughout.
 - **Sessions share a filesystem.** In multi-session mode two agents editing the
   same file will overwrite each other. That is a correctness property, not a
   security one, but it surprises people.

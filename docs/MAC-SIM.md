@@ -35,9 +35,16 @@ mac-sim list                              # available simulators + state
 mac-sim boot                              # the project's default device
 mac-sim install path/to/App.app
 mac-sim launch                            # the project's default bundle id
+mac-sim launch --locale pl                # relaunch in that language (pl, pl-PL)
 mac-sim openurl "myapp://"
+mac-sim appearance dark                   # light|dark; no arg prints the current one
 mac-sim screenshot /workspace/.mac-sim/x.png
-mac-sim logs --last 2m --lines 300 [--predicate '...']
+mac-sim logs --last 2m --lines 300        # the app's own process only
+mac-sim logs --all | --predicate '...'    # the whole simulator log, or your filter
+mac-sim status                            # device, claim, bundler, app; exit 0 = ready
+mac-sim pull db                           # copy a file out of the app's data
+mac-sim pull Documents/x.json out.json    # container: a declared alias, or a
+                                          # path relative to the container
 mac-sim build                             # xcodebuild the declared workspace
 mac-sim terminate | uninstall | shutdown | gui
 mac-sim -d "iPhone 16" boot               # target another device
@@ -61,7 +68,20 @@ mac-sim reset                             # force-stop a stuck command and
 mac-sim reset --pid 12345                 # only reset if that's still the pid
                                            # `mac-sim lock` showed you
 mac-sim run -f                            # take it over from another checkout
+
+mac-sim sim create mine                   # a private simulator for this checkout
+mac-sim --sim mine metro start            # every command takes --sim
+mac-sim sim list
+mac-sim sim delete mine                   # also stops its bundler
 ```
+
+`pull` writes under `.mac-sim/` by default, keeping the file's own name. A SQLite
+database is copied through the SQLite backup API, not as a file: a live database
+keeps its recent writes in a `-wal` sibling, so a plain copy of the main file is
+stale or torn. Declare aliases per project as `"pull": { "db": "Documents/app.db" }`.
+
+`launch --locale` terminates the app first, because launch arguments only reach a
+fresh process.
 
 A refused command exits `75` (`EX_TEMPFAIL`), not the shim's normal failure
 exit code, so a script can tell "busy, try again" apart from "actually broken."
@@ -126,9 +146,65 @@ finishes and releases it for real, and `mac-sim lock` reports live execution
 state (verb, pid, elapsed time) precisely so you can tell these two states
 apart before deciding which one to reach for.
 
-Read-only verbs never claim: `list`, `booted`, `runtimes`, `screenshot`, `logs`.
+Read-only verbs never claim: `list`, `booted`, `runtimes`, `screenshot`, `logs`,
+`pull`, `status`, and `appearance` without an argument.
 A project command claims by default; declare `"exclusive": false` for one that
 touches neither the simulator nor a shared port.
+
+### Private simulators
+
+The claim serialises checkouts. A private simulator removes the queue for the
+common case, a change that is JS only:
+
+```
+mac-sim sim create mine            # about a minute
+mac-sim --sim mine metro start     # this checkout's bundler, on its own port
+mac-sim --sim mine launch
+mac-sim --sim mine screenshot .mac-sim/x.png
+mac-sim sim delete mine
+```
+
+`sim create` makes a device of the same type and runtime as the project's default
+one, named `<project>-<name>`, and then does what the project's `simulators`
+block declares:
+
+```json
+"simulators": {
+  "max": 3,
+  "port_base": 8090,
+  "clone_app": true,
+  "copy_prefs": ["com.apple.launchservices.schemeapproval.plist"],
+  "global_defaults": { "RCT_jsLocation": "localhost:{port}" }
+}
+```
+
+- **`clone_app`** installs a copy of `defaults.bundle_id` from the shared
+  simulator, so a worktree with no native project still gets a binary. The shared
+  simulator must be booted with the app installed. It is the shared build: a
+  native change still has to be built, on either device.
+- **`port_base`** is where bundler ports are allocated from, one per simulator.
+  Commands reach it as `{port}`; `defaults.port` is the shared simulator's.
+- **`copy_prefs`** are files from the shared device's `Library/Preferences`,
+  copied before the first boot. The example carries the approval that stops iOS
+  asking "Open in ...?" on every deep link.
+- **`global_defaults`** are written to the device's global defaults domain. The
+  example points a React Native debug build at the private bundler; the global
+  domain survives an app-state reset, the app's own domain does not.
+- **`max`** caps how many exist. Each booted simulator costs a few GB of RAM.
+
+`--sim <name>` (or `MAC_SIM_SIM`) then targets it on any command, built-in or
+declared. A private simulator has its own claim, so it never contends with the
+shared one or with another private one, and the claim still stops a second
+checkout from driving or deleting it without `-f`.
+
+Without the block there are no private simulators: the verbs are refused. Only a
+simulator created here can be deleted here; the registry lives in
+`~/.local/state/cc-container/mac-sim-sims/`.
+
+For this to work a project's commands must not hardcode the device or the port.
+Use `{udid}` and `{port}`, including in `kill_port`, `ready_url` and `log`, which
+are rendered like `argv`. Pin a test runner to `{udid}` as well: with two
+simulators booted, "the booted one" is no longer one device.
 
 **A worktree's first native build is slow.** `apps/mobile/ios/` and friends are
 gitignored, so a fresh checkout has no native project and `expo run:ios` prebuilds
@@ -167,8 +243,9 @@ A command is an argv template plus its environment:
 ```
 
 - **Placeholders**: `{root}` (the calling checkout), `{project_root}` (always the
-  literal root), `{udid}`, `{device}`, `{bundle_id}`, `{scheme}`, plus any name in
-  `params`. A rendered value is always one argv element; it is never re-split and
+  literal root), `{udid}`, `{device}`, `{bundle_id}`, `{scheme}`, `{port}` (the
+  targeted simulator's bundler port), `{sim}` (its name, empty for the shared
+  one), plus any name in `params`. A rendered value is always one argv element; it is never re-split and
   never reaches a shell.
 - **`params`** are the only caller-supplied values, each validated by its own
   regex, or by `"path": true` (relative to the calling checkout, and still checked
@@ -182,17 +259,51 @@ A command is an argv template plus its environment:
 - **`variants`** overlay the base spec: `argv` is replaced, `env` is merged.
   Use them for build profiles. `--profile` selects one, unless the command
   declares a parameter of that name.
-- **`kill_port`** frees a TCP port first. This matters for bundlers whose env
+- **`kill_port`** frees a TCP port first, killing its listener only (not the
+  port's clients, which include the app on every simulator using it). This matters for bundlers whose env
   flags are inlined at build time: a stale server left from another profile
   silently serves the wrong bundle, and the failure looks like a selector bug
   rather than a wrong-build error.
-- **`detach` + `ready_url` + `ready_match`** run a server that must outlive the
-  request. It is started in its own session, logged to `log`, and the shim polls
-  `ready_url` until `ready_match` appears before replying.
+- **`detach`** runs a server that must outlive the request: it is started in
+  its own session and the shim replies once it is ready, leaving it running and
+  releasing the claim. Ready means `ready_url` answers with `ready_match`, and,
+  with **`ready_app`**, that the project's app has a live process on the device
+  (the installed copy is stopped first, so a stale one cannot pass). Declare a
+  build that goes on to serve the bundle (`expo run:ios`) this way: it never
+  exits, so as a plain command it holds the request and the claim until its
+  timeout. A detached command that exits, or is not ready within `timeout`
+  (after which it is stopped), has failed.
+- **`log`** overrides where the output goes. Leave it unset: the default is
+  inside the checkout, where the guest can read it.
+
+## Watching a command, and knowing when the app is ready
+
+The output of a project command that claims the simulator, or is detached, is
+written to `.mac-sim/logs/<command>.log` in the calling checkout (`<command>@<sim>.log` on a private simulator) as the host
+produces it. The CLI prints it live, so a build that takes minutes shows which
+phase it is in; `-q` prints only the end. From another shell, `mac-sim lock`
+names the log of whatever is executing, and the file can be read directly. Add
+`.mac-sim/` to the project's `.gitignore`.
+
+`mac-sim status` answers "can I drive the app now?" in one call and exits 0
+only when the answer is yes:
+
+```
+simulator: iPhone 17 Pro (ACAB998C-...) Booted
+claim: simulator held by /workspace
+  last command: run, 0m 12s ago
+bundler: running on 8081, started by `run` (profile e2e) from /workspace, 0m 14s ago
+app: com.example.app running
+ready: yes
+```
+
+The bundler line is the only way to learn which build profile a running bundler
+carries: its flags are inlined when it starts and it cannot report them. A
+bundler started outside mac-sim is reported as such, with its profile unknown.
 
 ## Lifecycle: nothing to run by hand
 
-`ccup` and `ccrun`/`ccsh` start the shim automatically **when the directory you
+`ccup` and `ccrun`/`pirun`/`ccsh` start the shim automatically **when the directory you
 launch from is inside a declared project root**, and `ccdown` stops it (with the
 proxy) once no containers remain. So the normal flow is just `ccup`.
 

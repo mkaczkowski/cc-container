@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Sync the container's declarative MCP server list into Claude Code's user scope.
+"""Sync the container's declarative MCP server list into each agent's user scope.
 
 The host directory ~/.config/cc-container/mcp/ is mounted read-only at /opt/cc-mcp
 (a directory, so an editor's atomic save on the host is picked up rather than
@@ -9,9 +9,14 @@ top-level `mcpServers` of /root/.claude.json, which is what `claude mcp add
 than passing --mcp-config) keeps those commands working and leaves project
 scope (.mcp.json) untouched.
 
-Servers this script owns are recorded in a sidecar so that deleting one from
-mcp-servers.json also removes it from the user scope, while servers added by
-hand with `claude mcp add` are never touched.
+The same servers are merged into pi's user-level mcp.json (~/.pi/agent/mcp.json,
+or $PI_CODING_AGENT_DIR/mcp.json), which uses the same `mcpServers` schema and is
+what `pi mcp list` and /mcp read. Both targets are written on every run, whichever
+agent is starting, so switching between them never shows a stale list.
+
+Servers this script owns are recorded in a sidecar per target so that deleting
+one from mcp-servers.json also removes it from the user scope, while servers
+added by hand with `claude mcp add` or `pi mcp add` are never touched.
 
 ${VAR} placeholders in string values are expanded from the environment; a
 missing variable is a hard error, not a silently empty key.
@@ -29,8 +34,12 @@ import sys
 import tempfile
 
 CONFIG = "/opt/cc-mcp/mcp-servers.json"
-CLAUDE_JSON = os.path.expanduser("~/.claude.json")
-MANAGED = os.path.expanduser("~/.cc-mcp-managed.json")
+PI_AGENT_DIR = os.environ.get("PI_CODING_AGENT_DIR") or os.path.expanduser("~/.pi/agent")
+# (agent config file, sidecar listing the servers this script added to it)
+TARGETS = (
+    (os.path.expanduser("~/.claude.json"), os.path.expanduser("~/.cc-mcp-managed.json")),
+    (os.path.join(PI_AGENT_DIR, "mcp.json"), os.path.expanduser("~/.cc-mcp-managed-pi.json")),
+)
 PLACEHOLDER = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 
 
@@ -69,6 +78,10 @@ def read_json(path, default):
 
 def write_json_atomic(path, data):
     directory = os.path.dirname(path) or "."
+    try:
+        os.makedirs(directory, exist_ok=True)
+    except OSError as exc:
+        fail(f"cannot create {directory}: {exc}")
     fd, tmp = tempfile.mkstemp(dir=directory, prefix=".cc-mcp-sync.")
     try:
         with os.fdopen(fd, "w") as fh:
@@ -94,9 +107,21 @@ def main():
         fail(f"{CONFIG}: 'mcpServers' must be an object, got {type(desired).__name__}")
     desired = {name: expand(spec, name) for name, spec in desired.items()}
 
-    claude = read_json(CLAUDE_JSON, {})
-    servers = claude.setdefault("mcpServers", {})
-    previously_managed = read_json(MANAGED, [])
+    any_changed = False
+    for target, managed in TARGETS:
+        any_changed |= sync_target(target, managed, desired)
+
+    if any_changed and sys.stdout.isatty():
+        print(f"cc-mcp-sync: {', '.join(sorted(desired)) or 'none'}")
+
+
+def sync_target(target, managed, desired):
+    """Merge desired into target's mcpServers; return whether target changed."""
+    config = read_json(target, {})
+    servers = config.setdefault("mcpServers", {})
+    if not isinstance(servers, dict):
+        fail(f"{target}: 'mcpServers' must be an object, got {type(servers).__name__}")
+    previously_managed = read_json(managed, [])
 
     # Drop servers we added on an earlier run that are no longer declared, so
     # removing an entry from mcp-servers.json actually removes it.
@@ -107,11 +132,9 @@ def main():
     servers.update(desired)
 
     if changed:
-        write_json_atomic(CLAUDE_JSON, claude)
-    write_json_atomic(MANAGED, sorted(desired))
-
-    if changed and sys.stdout.isatty():
-        print(f"cc-mcp-sync: {', '.join(sorted(desired)) or 'none'}")
+        write_json_atomic(target, config)
+    write_json_atomic(managed, sorted(desired))
+    return changed
 
 
 if __name__ == "__main__":

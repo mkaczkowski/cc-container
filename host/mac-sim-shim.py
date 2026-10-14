@@ -14,6 +14,13 @@ Two kinds of verb:
     hardcoded here and work for any project.
   * Project verbs (build, run, test, ...) come from the CONFIG file's per-project
     `commands` block, as argv templates with a fixed placeholder vocabulary.
+  * Direct verbs (sim_create, sim_delete, sim_list, pull, status) are several
+    fixed host steps behind one request, so they are functions here rather than
+    one argv.
+
+A project command's output goes to a log inside the caller's checkout
+(.mac-sim/logs/<command>.log) while it runs, so the guest can follow a build
+that takes minutes instead of waiting on a silent request.
 
 The config is read from the host filesystem ONLY, never from the bind-mounted
 workspace. That distinction is the security boundary: anything inside the
@@ -29,7 +36,9 @@ import os
 import plistlib
 import re
 import shlex
+import shutil
 import signal
+import sqlite3
 import subprocess
 import sys
 import threading
@@ -37,6 +46,7 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from ipaddress import ip_address, ip_network
 from pathlib import Path
+from urllib.parse import quote
 
 CONFIG_PATH = os.environ.get(
     "MAC_SIM_CONFIG",
@@ -54,7 +64,20 @@ LOCK_DIR = Path(os.environ.get(
     os.path.expanduser("~/.local/state/cc-container/mac-sim-locks"),
 ))
 
+# The registry of simulators this shim created, one file per project. It is what
+# makes `sim delete` safe to expose: only a device recorded here can be deleted.
+SIM_DIR = Path(os.environ.get(
+    "MAC_SIM_SIM_DIR",
+    os.path.expanduser("~/.local/state/cc-container/mac-sim-sims"),
+))
+
+# Live output of project commands, relative to the caller's checkout: inside the
+# bind mount, so the guest reads it while the command is still running.
+LOG_SUBDIR = ".mac-sim/logs"
+MAX_LOG_REPLY = 200_000
+
 MAX_BODY = 64 * 1024
+MAX_PULL_BYTES = 1024 ** 3
 DEFAULT_TIMEOUT = 300
 
 UDID_RE = re.compile(r"^[0-9A-Fa-f-]{36}$")
@@ -64,12 +87,24 @@ DEVICE_RE = re.compile(r"^[A-Za-z0-9._()' -]{1,64}$")
 NAME_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 URL_RE = re.compile(r"^[A-Za-z0-9+.-]{1,32}://[^\s]{0,512}$")
 LAST_RE = re.compile(r"^\d{1,4}[smh]$")
+SIM_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,31}$")
+LOCALE_RE = re.compile(r"^[A-Za-z]{2,3}([_-][A-Za-z0-9]{2,8}){0,2}$")
+EXECUTABLE_RE = re.compile(r"^[A-Za-z0-9._ -]{1,64}$")
 
 BUILTIN_VERBS = [
     "list", "booted", "runtimes", "boot", "shutdown", "open_simulator_ui",
     "install", "uninstall", "launch", "terminate", "screenshot", "openurl",
-    "logs", "xcodebuild", "project_command", "lock",
+    "appearance", "logs", "xcodebuild", "project_command", "lock",
+    "sim_create", "sim_delete", "sim_list", "pull", "status",
 ]
+
+# Verbs made of several host steps; see the "Direct verbs" section.
+DIRECT_VERBS = {"sim_create", "sim_delete", "sim_list", "pull", "status"}
+
+# Request fields an older shim would silently ignore, turning "act on my private
+# simulator" into "act on the shared one". The guest checks this list before
+# sending such a field, so a stale shim is reported instead of obeyed wrongly.
+FEATURES = ["appearance", "locale", "pull", "sim", "progress", "status"]
 
 # Verbs that need no project context: they describe the Mac, not a checkout.
 GLOBAL_VERBS = {"list", "booted", "runtimes", "open_simulator_ui"}
@@ -78,7 +113,7 @@ GLOBAL_VERBS = {"list", "booted", "runtimes", "open_simulator_ui"}
 # concurrently produce nonsense. Read-only observation (screenshot, logs) is
 # deliberately absent: blocking it would break debugging for no safety gain.
 EXCLUSIVE_BUILTINS = {"boot", "shutdown", "install", "uninstall", "launch",
-                      "terminate", "openurl", "xcodebuild"}
+                      "terminate", "openurl", "appearance", "xcodebuild"}
 
 
 class Rejected(Exception):
@@ -88,6 +123,15 @@ class Rejected(Exception):
 class Busy(Rejected):
     """Another checkout holds the simulator. Distinct so it answers 409, not
     400: nothing about the request was wrong, it just arrived at a bad time."""
+
+
+class HostFailure(Exception):
+    """A host step of a direct verb exited non-zero. The request was valid, so
+    this is reported like any failed command: exit code plus the tool's output."""
+
+    def __init__(self, argv, code, output):
+        super().__init__(f"{shlex.join(argv)} failed (exit {code}): {output}")
+        self.code = code
 
 
 def log(msg):
@@ -121,6 +165,10 @@ class Config:
             entry.setdefault("guest_mount", "/workspace")
             entry.setdefault("defaults", {})
             entry.setdefault("commands", {})
+            entry.setdefault("pull", {})
+            sims = entry.get("simulators")
+            if sims is not None and not isinstance(sims, dict):
+                raise ValueError(f"project {name}: 'simulators' must be an object")
             self.projects[name] = entry
         if not self.projects:
             raise ValueError("config declares no projects")
@@ -250,13 +298,21 @@ def app_bundle_id(app_path):
         return plistlib.load(fh).get("CFBundleIdentifier")
 
 
+def port_listeners(port):
+    out = subprocess.run(["lsof", "-nP", f"-iTCP:{int(port)}", "-sTCP:LISTEN", "-t"],
+                         capture_output=True, text=True)
+    return out.stdout.split()
+
+
 def kill_port(port):
     """Free a TCP port without a shell. Used before builds whose bundler flags
-    are inlined at build time, where a stale server would serve the wrong thing."""
-    out = subprocess.run(["lsof", "-ti", f":{int(port)}"],
-                         capture_output=True, text=True)
+    are inlined at build time, where a stale server would serve the wrong thing.
+
+    Listeners only: a plain `lsof -ti :PORT` also names every CLIENT of that
+    port, which with several simulators means the app running on somebody
+    else's device."""
     killed = []
-    for pid in out.stdout.split():
+    for pid in port_listeners(port):
         try:
             os.kill(int(pid), signal.SIGKILL)
             killed.append(pid)
@@ -264,6 +320,66 @@ def kill_port(port):
             pass
     if killed:
         log(f"freed port {port} (killed {', '.join(killed)})")
+
+
+def app_running(udid, bundle):
+    """Whether the app has a live process on that simulator."""
+    out = subprocess.run(["xcrun", "simctl", "spawn", udid, "launchctl", "list"],
+                         capture_output=True, text=True, timeout=30)
+    return f"UIKitApplication:{bundle}[" in out.stdout
+
+
+def app_executable(udid, bundle):
+    """The app's process name, which is what the unified log is filtered by."""
+    try:
+        app = run_host(["xcrun", "simctl", "get_app_container", udid, bundle, "app"], 60)
+    except HostFailure as exc:
+        raise Rejected(
+            f"{bundle} is not installed on that simulator, so its logs cannot be "
+            f"told apart from the system's. Install it first, or pass --all for "
+            f"the unfiltered log. [{exc}]")
+    with open(Path(app) / "Info.plist", "rb") as fh:
+        name = plistlib.load(fh).get("CFBundleExecutable")
+    if not isinstance(name, str) or not EXECUTABLE_RE.match(name):
+        raise Rejected(f"{bundle} has an unusable CFBundleExecutable: {name!r}")
+    return name
+
+
+# --------------------------------------------------------------------------
+# Command logs: live output the guest can follow
+# --------------------------------------------------------------------------
+def command_log_path(project, base, name, sim=None):
+    stem = f"{name}@{sim['name']}" if sim else name
+    return safe_path(f"{LOG_SUBDIR}/{stem}.log", project, base=base)
+
+
+def open_command_log(path):
+    """A fresh log for one run of a command.
+
+    The directory is writable from the guest, so the file is replaced rather
+    than truncated and never opened through a symlink: safe_path already
+    refused a path that resolves outside the project, and O_EXCL | O_NOFOLLOW
+    refuses a link planted at the final component after that check.
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.unlink(missing_ok=True)
+    return os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                             0o644), "wb")
+
+
+def read_log_tail(path, limit=MAX_LOG_REPLY):
+    with open(path, "rb") as fh:
+        size = fh.seek(0, os.SEEK_END)
+        fh.seek(max(0, size - limit))
+        return fh.read().decode(errors="replace")
+
+
+def kill_group(pid):
+    try:
+        os.killpg(pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass
 
 
 # --------------------------------------------------------------------------
@@ -308,7 +424,7 @@ def merge_variant(spec, variant_name):
     return merged
 
 
-def project_command(body, project, base):
+def project_command(body, project, base, sim=None):
     name = field(body, "command", NAME_RE)
     commands = project["commands"]
     if name not in commands:
@@ -329,10 +445,17 @@ def project_command(body, project, base):
                            default=defaults.get("bundle_id")),
         "scheme": field(body, "scheme", SCHEME_RE, required=False,
                         default=defaults.get("scheme")),
+        # {port} is the bundler port of the simulator being targeted: a private
+        # simulator's own allocation, otherwise the project's shared default.
+        # {sim} is the private simulator's name, empty for the shared one.
+        "port": sim["port"] if sim else defaults.get("port"),
+        "sim": sim["name"] if sim else "",
     }
     # Only resolve a UDID when the template actually asks for one: it costs a
     # simctl call and would fail on a machine with no matching simulator.
-    if any("{udid}" in part for part in spec.get("argv", [])):
+    templates = spec.get("argv", []) + [part for extra in spec.get("optional_argv", [])
+                                        for part in extra.get("argv", [])]
+    if any("{udid}" in part for part in templates):
         values["udid"] = resolve_device(body, project)
 
     # Declared parameters, each validated by its own regex. Anything the caller
@@ -385,13 +508,34 @@ def project_command(body, project, base):
     # Project commands hold the claim by default: most of them build, install,
     # or drive the simulator. Declare "exclusive": false for the read-only ones.
     extra = {"cwd": str(cwd), "env": env, "_exclusive": bool(spec.get("exclusive", True))}
+    # Rendered like argv, so a command can free and probe "{port}" and stay
+    # correct on a private simulator.
     if spec.get("kill_port"):
-        extra["kill_port"] = int(spec["kill_port"])
+        rendered = render(str(spec["kill_port"]), values)
+        if not rendered.isdigit():
+            raise Rejected(f"kill_port of {name!r} rendered to {rendered!r}, not a port")
+        extra["kill_port"] = int(rendered)
+    # A command that holds the claim runs one at a time, so it can own one log
+    # file. A non-exclusive one may overlap itself; it is short, and replies with
+    # its output as before.
+    if spec.get("log"):
+        extra["log"] = render(spec["log"], values)
+    elif extra["_exclusive"] or spec.get("detach"):
+        extra["log"] = str(command_log_path(project, base, name, sim))
     if spec.get("detach"):
         extra["detach"] = True
-        extra["ready_url"] = spec.get("ready_url")
+        extra["ready_url"] = render(spec["ready_url"], values) if spec.get("ready_url") else None
         extra["ready_match"] = spec.get("ready_match", "")
-        extra["log"] = spec.get("log", f"/tmp/mac-sim-{name}.log")
+        if spec.get("ready_app"):
+            # Ready only once the app is running on the device: a build that
+            # also serves the bundle never exits, so its exit cannot be the signal.
+            if not values["bundle_id"]:
+                raise Rejected(f"ready_app of {name!r} needs a bundle_id")
+            extra["ready_app"] = {"udid": values.get("udid") or resolve_device(body, project),
+                                  "bundle_id": values["bundle_id"]}
+        # What `mac-sim status` reports about the server this leaves running.
+        extra["server"] = {"command": name, "variant": body.get("variant"),
+                           "port": values["port"]}
     return argv, int(spec.get("timeout", DEFAULT_TIMEOUT)), extra
 
 
@@ -411,14 +555,22 @@ def build_command(verb, body, config):
         return argv, timeout, extra, None
     project = config.project(body.get("project"))
     base = resolve_workdir(body, project)
-    argv, timeout, extra = dispatch(verb, body, project, base)
+    sim = resolve_sim(body, project)
+    if sim:
+        body = {**body, "udid": sim["udid"]}
+    argv, timeout, extra = dispatch(verb, body, project, base, sim)
     extra["workdir"] = str(base)
+    if "log" in extra:
+        extra["guest_log"] = to_guest_path(project, extra["log"])
+    if "server" in extra:
+        extra["server"].update({"name": lock_name(project, sim), "workdir": str(base),
+                                "guest_workdir": to_guest_path(project, base)})
     if extra.pop("_exclusive", verb in EXCLUSIVE_BUILTINS) and config.lock_enabled:
-        extra["_lock"] = project["name"]
+        extra["_lock"] = lock_name(project, sim)
     return argv, timeout, extra, project
 
 
-def dispatch(verb, body, project, base):
+def dispatch(verb, body, project, base, sim=None):
     if verb == "list":
         return ["xcrun", "simctl", "list", "devices", "available", "--json"], 60, {}
     if verb == "booted":
@@ -445,7 +597,19 @@ def dispatch(verb, body, project, base):
                        default=project["defaults"].get("bundle_id"))
         if not bundle:
             raise Rejected("no bundle_id given and the project declares no default")
-        return ["xcrun", "simctl", verb, resolve_device(body, project), bundle], 120, {}
+        udid = resolve_device(body, project)
+        locale = field(body, "locale", LOCALE_RE, required=False)
+        if locale is None:
+            return ["xcrun", "simctl", verb, udid, bundle], 120, {}
+        if verb != "launch":
+            raise Rejected("locale applies to launch only")
+        # Launch arguments reach only a fresh process: launching an app that is
+        # already running just foregrounds it in its old language.
+        argv = ["xcrun", "simctl", "launch", "--terminate-running-process", udid, bundle,
+                "-AppleLanguages", f"({locale})"]
+        if re.search(r"[_-]", locale):
+            argv += ["-AppleLocale", locale.replace("-", "_")]
+        return argv, 120, {}
 
     if verb == "screenshot":
         # Written inside the bind mount so the guest can read it back.
@@ -462,12 +626,23 @@ def dispatch(verb, body, project, base):
             raise Rejected("openurl requires a scheme:// URL")
         return ["xcrun", "simctl", "openurl", resolve_device(body, project), url], 120, {}
 
+    if verb == "appearance":
+        udid = resolve_device(body, project)
+        mode = body.get("mode")
+        if mode is None:
+            # Reading the current appearance changes nothing, so it needs no claim.
+            return ["xcrun", "simctl", "ui", udid, "appearance"], 60, {"_exclusive": False}
+        if mode not in ("light", "dark"):
+            raise Rejected(f"appearance mode must be 'light' or 'dark', got {mode!r}")
+        return ["xcrun", "simctl", "ui", udid, "appearance", mode], 60, {}
+
     if verb == "logs":
         # Bounded: a finite dump, never an unbounded stream.
         lines = body.get("lines", 200)
         if not isinstance(lines, int) or not 1 <= lines <= 5000:
             raise Rejected("lines must be an int in 1..5000")
-        argv = ["xcrun", "simctl", "spawn", resolve_device(body, project),
+        udid = resolve_device(body, project)
+        argv = ["xcrun", "simctl", "spawn", udid,
                 "log", "show", "--style", "compact", "--last",
                 field(body, "last", LAST_RE, required=False, default="2m")]
         if "predicate" in body:
@@ -475,6 +650,15 @@ def dispatch(verb, body, project, base):
             if not isinstance(pred, str) or len(pred) > 512 or '"' in pred:
                 raise Rejected("invalid predicate")
             argv += ["--predicate", pred]
+        elif not body.get("all"):
+            # The simulator's own daemons write nearly all of the unified log, so
+            # the unfiltered dump buries the app. Scope to its process by default.
+            bundle = field(body, "bundle_id", BUNDLE_RE, required=False,
+                           default=project["defaults"].get("bundle_id"))
+            if not bundle:
+                raise Rejected("no bundle_id to scope the log to; pass --all for the "
+                               "unfiltered log, or --predicate")
+            argv += ["--predicate", f'process == "{app_executable(udid, bundle)}"']
         return argv, 180, {"tail": lines}
 
     if verb == "xcodebuild":
@@ -497,9 +681,376 @@ def dispatch(verb, body, project, base):
                 {})
 
     if verb == "project_command":
-        return project_command(body, project, base)
+        return project_command(body, project, base, sim)
 
     raise Rejected(f"unknown verb: {verb!r}")
+
+
+# --------------------------------------------------------------------------
+# Private simulators
+# --------------------------------------------------------------------------
+# The shared simulator serialises every checkout behind one claim. A private
+# simulator removes that for the common case, a change that is JS only: it gets a
+# copy of the app already installed on the shared device, its own bundler port,
+# and its own claim, so two worktrees verify at the same time.
+#
+# Everything project-specific is declared in the project's "simulators" block
+# (which preferences to copy, which defaults point the app at its bundler); the
+# steps themselves are fixed here. A project without that block has no private
+# simulators at all, so the verbs stay inert until the host owner opts in.
+_SIMS_LOCK = threading.Lock()
+
+
+def _sims_path(project_name):
+    return SIM_DIR / f"{project_name}.json"
+
+
+def read_sims(project_name):
+    try:
+        with open(_sims_path(project_name)) as fh:
+            return json.load(fh)
+    except FileNotFoundError:
+        return {}
+
+
+def write_sims(project_name, sims):
+    SIM_DIR.mkdir(parents=True, exist_ok=True)
+    tmp = _sims_path(project_name).with_suffix(".tmp")
+    with open(tmp, "w") as fh:
+        json.dump(sims, fh, indent=2)
+    tmp.replace(_sims_path(project_name))
+
+
+def lock_name(project, sim=None):
+    """One claim per device: the shared simulator's is the project name."""
+    return f"{project['name']}@{sim['name']}" if sim else project["name"]
+
+
+def resolve_sim(body, project):
+    """The private simulator a request targets, or None for the shared one."""
+    name = field(body, "sim", SIM_NAME_RE, required=False)
+    if name is None:
+        return None
+    if "device" in body or "udid" in body:
+        raise Rejected("'sim' names the device already; do not also send device/udid")
+    entry = read_sims(project["name"]).get(name)
+    if not entry or entry.get("state") != "ready":
+        raise Rejected(
+            f"project {project['name']!r} has no private simulator {name!r}"
+            + (" (it is still being created)" if entry else "")
+            + f". `mac-sim sim list` shows them; `mac-sim sim create {name}` makes one.")
+    return {"name": name, **entry}
+
+
+def run_host(argv, timeout=120):
+    log(f"RUN {shlex.join(argv)}")
+    try:
+        proc = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        raise HostFailure(argv, 124, f"timed out after {timeout}s")
+    if proc.returncode != 0:
+        raise HostFailure(argv, proc.returncode, (proc.stderr or proc.stdout).strip())
+    return proc.stdout.strip()
+
+
+def simctl_devices():
+    """Every simulator on the Mac, keyed by UDID, with its runtime attached."""
+    listing = json.loads(run_host(["xcrun", "simctl", "list", "devices", "--json"], 60))
+    return {d["udid"]: {**d, "runtime": runtime}
+            for runtime, devices in listing.get("devices", {}).items() for d in devices}
+
+
+def simulators_config(project):
+    cfg = project.get("simulators")
+    if cfg is None:
+        raise Rejected(
+            f"project {project['name']!r} declares no \"simulators\" block in the host "
+            f"config, so it has only the shared simulator. See docs/MAC-SIM.md.")
+    return cfg
+
+
+def sim_create(body, project, base):
+    cfg = simulators_config(project)
+    pname = project["name"]
+    name = field(body, "name", SIM_NAME_RE)
+    limit = int(cfg.get("max", 3))
+    port_base = int(cfg.get("port_base", 8090))
+
+    # Reserve the name and the port under the mutex, then do the slow work
+    # outside it: a boot takes the better part of a minute.
+    with _SIMS_LOCK:
+        sims = read_sims(pname)
+        if name in sims:
+            raise Rejected(f"simulator {name!r} already exists; target it with "
+                           f"--sim {name}, or `mac-sim sim delete {name}` first")
+        if len(sims) >= limit:
+            raise Rejected(
+                f"{pname} already has {len(sims)} private simulators "
+                f"({', '.join(sorted(sims))}), the configured maximum. Each booted "
+                f"one costs a few GB of RAM; delete one first.")
+        taken = {entry.get("port") for entry in sims.values()}
+        port = next((p for p in range(port_base, port_base + 200)
+                     if p not in taken and not port_listeners(p)), None)
+        if port is None:
+            raise Rejected(f"no free bundler port in {port_base}..{port_base + 199}")
+        sims[name] = {"state": "creating", "port": port, "workdir": str(base),
+                      "guest_workdir": to_guest_path(project, base), "created": time.time()}
+        write_sims(pname, sims)
+
+    udid, notes = None, []
+    try:
+        source_udid = resolve_device({}, project)
+        source = simctl_devices()[source_udid]
+        bundle = project["defaults"].get("bundle_id")
+        app = None
+        if cfg.get("clone_app", True):
+            if not bundle:
+                raise Rejected("simulators.clone_app needs defaults.bundle_id")
+            if source["state"] != "Booted":
+                raise Rejected(
+                    f"the shared simulator {source['name']!r} is not booted, so its "
+                    f"installed app cannot be copied. `mac-sim boot` it first.")
+            try:
+                app = run_host(["xcrun", "simctl", "get_app_container",
+                                source_udid, bundle, "app"], 60)
+            except HostFailure as exc:
+                raise Rejected(
+                    f"{bundle} is not installed on the shared simulator "
+                    f"{source['name']!r}, so there is no build to copy. Install one "
+                    f"there first (the project's build command). [{exc}]")
+
+        udid = run_host(["xcrun", "simctl", "create", f"{pname}-{name}",
+                         source["deviceTypeIdentifier"], source["runtime"]], 120)
+        if not UDID_RE.match(udid):
+            raise HostFailure(["xcrun", "simctl", "create"], 1,
+                              f"expected a UDID, got {udid!r}")
+
+        # Copied while the new device is still shut down, so the system reads
+        # them on its first boot.
+        for pref in cfg.get("copy_prefs", []):
+            src = Path(source["dataPath"]) / "Library" / "Preferences" / pref
+            if not src.is_file():
+                notes.append(f"note: the shared simulator has no {pref}; not copied")
+                continue
+            dst_dir = Path(simctl_devices()[udid]["dataPath"]) / "Library" / "Preferences"
+            dst_dir.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(src, dst_dir / pref)
+
+        run_host(["xcrun", "simctl", "boot", udid], 180)
+        run_host(["xcrun", "simctl", "bootstatus", udid, "-b"], 600)
+        if app:
+            run_host(["xcrun", "simctl", "install", udid, app], 300)
+        # The global domain, not the app's: an app-state reset wipes the app's own
+        # defaults and would silently send it back to the shared bundler port.
+        for key, template in cfg.get("global_defaults", {}).items():
+            run_host(["xcrun", "simctl", "spawn", udid, "defaults", "write", "-g",
+                      key, render(str(template), {"port": port, "sim": name})], 60)
+    except BaseException:
+        if udid and UDID_RE.match(udid):
+            subprocess.run(["xcrun", "simctl", "delete", udid], capture_output=True)
+        with _SIMS_LOCK:
+            sims = read_sims(pname)
+            sims.pop(name, None)
+            write_sims(pname, sims)
+        raise
+
+    with _SIMS_LOCK:
+        sims = read_sims(pname)
+        sims[name].update({"state": "ready", "udid": udid})
+        write_sims(pname, sims)
+    lines = [f"created simulator {name!r} ({pname}-{name})",
+             f"  udid: {udid}",
+             f"  bundler port: {port}",
+             f"  app: {'copied from the shared simulator' if app else 'none installed'}",
+             f"Target it with --sim {name} on any command."] + notes
+    return "\n".join(lines), {"sim": name, "udid": udid, "port": port}
+
+
+def sim_delete(body, project, base):
+    simulators_config(project)
+    pname = project["name"]
+    name = field(body, "name", SIM_NAME_RE)
+    entry = read_sims(pname).get(name)
+    if not entry:
+        raise Rejected(f"{pname} has no private simulator {name!r}; only simulators "
+                       f"created with `mac-sim sim create` can be deleted")
+    kill_port(entry["port"])  # its bundler, which serves nothing once the device is gone
+    udid = entry.get("udid")
+    if udid:
+        device = simctl_devices().get(udid)
+        if device:
+            if device["state"] != "Shutdown":
+                run_host(["xcrun", "simctl", "shutdown", udid], 120)
+            run_host(["xcrun", "simctl", "delete", udid], 120)
+    with _SIMS_LOCK:
+        sims = read_sims(pname)
+        sims.pop(name, None)
+        write_sims(pname, sims)
+    return f"deleted simulator {name!r}", {"sim": name}
+
+
+def sim_list(body, project, base):
+    cfg = simulators_config(project)
+    pname = project["name"]
+    sims = read_sims(pname)
+    if not sims:
+        return f"{pname}: no private simulators (max {int(cfg.get('max', 3))})", {"simulators": {}}
+    devices = simctl_devices()
+    lines = [f"{pname}: {len(sims)} of {int(cfg.get('max', 3))} private simulators"]
+    for name, entry in sorted(sims.items()):
+        device = devices.get(entry.get("udid"))
+        if entry.get("state") != "ready":
+            state = "creating"
+        elif device is None:
+            state = f"GONE (deleted outside mac-sim; `mac-sim sim delete {name}` clears it)"
+        else:
+            state = device["state"]
+        age = int(time.time() - float(entry.get("created", 0)))
+        lines.append(f"  {name:<16} {state:<10} port {entry.get('port')}  "
+                     f"{entry.get('udid', '-')}  from "
+                     f"{entry.get('guest_workdir') or entry.get('workdir')}, "
+                     f"{age // 3600}h {age % 3600 // 60}m old")
+    return "\n".join(lines), {"simulators": sims}
+
+
+def pull(body, project, base):
+    """Copy one file out of the app's data container into the workspace, so a
+    guest can inspect what the app actually wrote (its database, a settings file)."""
+    aliases = project["pull"]
+    what = body.get("path")
+    rel = aliases.get(what, what) if isinstance(what, str) else None
+    if not isinstance(rel, str) or not rel or len(rel) > 512 or os.path.isabs(rel):
+        raise Rejected("pull needs a path relative to the app's data container"
+                       + (f", or one of: {', '.join(sorted(aliases))}" if aliases else ""))
+    bundle = field(body, "bundle_id", BUNDLE_RE, required=False,
+                   default=project["defaults"].get("bundle_id"))
+    if not bundle:
+        raise Rejected("no bundle_id given and the project declares no default")
+    sim = resolve_sim(body, project)
+    udid = sim["udid"] if sim else resolve_device(body, project)
+    out = safe_path(body.get("out"), project, base=base)
+    container = Path(run_host(["xcrun", "simctl", "get_app_container",
+                               udid, bundle, "data"], 60)).resolve()
+    src = (container / rel).resolve()
+    if container not in src.parents:
+        raise Rejected(f"{rel!r} resolves outside the data container of {bundle}")
+    if not src.is_file():
+        raise Rejected(f"no file {rel!r} in the data container of {bundle} on that simulator")
+    size = src.stat().st_size
+    if size > MAX_PULL_BYTES:
+        raise Rejected(f"{rel!r} is {size} bytes, over the {MAX_PULL_BYTES} byte limit")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    with open(src, "rb") as fh:
+        is_sqlite = fh.read(16) == b"SQLite format 3\x00"
+    if is_sqlite:
+        # A live database keeps recent writes in its -wal file, so copying the
+        # main file alone yields a stale or torn snapshot. The backup API reads
+        # through the WAL and writes one self-contained file.
+        out.unlink(missing_ok=True)
+        source = sqlite3.connect(f"file:{quote(str(src))}?mode=ro", uri=True)
+        try:
+            target = sqlite3.connect(str(out))
+            try:
+                source.backup(target)
+            finally:
+                target.close()
+        finally:
+            source.close()
+    else:
+        shutil.copyfile(src, out)
+    return (f"{out} ({out.stat().st_size} bytes{', sqlite snapshot' if is_sqlite else ''})",
+            {"path": str(out)})
+
+
+# The server a detached command left running (a bundler, usually), recorded so
+# `mac-sim status` can say which build profile it carries: the server itself
+# cannot report the flags it was started with.
+def _server_path(name):
+    return LOCK_DIR / f"{name}.server.json"
+
+
+def write_server(record):
+    LOCK_DIR.mkdir(parents=True, exist_ok=True)
+    tmp = _server_path(record["name"]).with_suffix(".tmp")
+    with open(tmp, "w") as fh:
+        json.dump(record, fh)
+    tmp.replace(_server_path(record["name"]))
+
+
+def read_server(name):
+    """The recorded server, only while the port is still held by the process
+    group that record describes. Anything else listening there was started some
+    other way, and its flags are unknown."""
+    try:
+        with open(_server_path(name)) as fh:
+            record = json.load(fh)
+    except (OSError, json.JSONDecodeError):
+        return None
+    for pid in port_listeners(record["port"]):
+        try:
+            if os.getpgid(int(pid)) == record["pid"]:
+                return record
+        except (ProcessLookupError, PermissionError, ValueError):
+            pass
+    return None
+
+
+def status(body, project, base):
+    """One objective answer to "can I use the app now?": the device, the claim,
+    what is executing, the bundler and the app, checked on the host."""
+    sim = resolve_sim(body, project)
+    name = lock_name(project, sim)
+    defaults = project["defaults"]
+    udid = sim["udid"] if sim else resolve_device(body, project)
+    device = simctl_devices().get(udid)
+    if device is None:
+        raise Rejected(f"simulator {udid} no longer exists on the Mac")
+    booted = device["state"] == "Booted"
+    lines = [f"simulator: {device['name']} ({udid}) {device['state']}"]
+
+    owner_text = describe_owner(name, Handler.config.lock_ttl)
+    lines.append("claim: " + owner_text.split(": ", 1)[1])
+    executing = _executing_info(name)
+    if executing and executing.get("log"):
+        lines.append(f"  log: {executing['log']}")
+
+    port = sim["port"] if sim else defaults.get("port")
+    serving = None
+    if port:
+        serving = bool(port_listeners(port))
+        server = read_server(name) if serving else None
+        if server:
+            age = int(time.time() - float(server["at"]))
+            profile = server.get("variant") or "default"
+            lines.append(
+                f"bundler: running on {port}, started by `{server['command']}` "
+                f"(profile {profile}) from "
+                f"{server.get('guest_workdir') or server['workdir']}, "
+                f"{age // 60}m {age % 60}s ago")
+        elif serving:
+            lines.append(f"bundler: something is listening on {port}, not started "
+                         f"through mac-sim, so its build profile is unknown")
+        else:
+            lines.append(f"bundler: nothing listening on {port}")
+
+    bundle = defaults.get("bundle_id")
+    running = None
+    if bundle:
+        running = booted and app_running(udid, bundle)
+        lines.append(f"app: {bundle} {'running' if running else 'not running'}")
+
+    blockers = [reason for failed, reason in (
+        (not booted, "simulator not booted"),
+        (executing is not None, f"{(executing or {}).get('verb')!r} still executing"),
+        (serving is False, "no bundler"),
+        (running is False, "app not running"),
+    ) if failed]
+    lines.append("ready: " + ("yes" if not blockers else "no (" + ", ".join(blockers) + ")"))
+    return "\n".join(lines), {"ready": not blockers}
+
+
+DIRECT = {"sim_create": sim_create, "sim_delete": sim_delete,
+          "sim_list": sim_list, "pull": pull, "status": status}
 
 
 # --------------------------------------------------------------------------
@@ -593,6 +1144,8 @@ def describe_owner(name, ttl):
         live = (f"  EXECUTING NOW: {claim.verb!r} (pid {claim.pid or 'starting'}), "
                 f"{elapsed // 60}m {elapsed % 60}s so far, from "
                 f"{claim.guest_workdir or claim.workdir}")
+        if claim.log:
+            live += f"\n  live output: {claim.log}"
     if not owner:
         out = f"{name}: simulator free"
         if live:
@@ -615,6 +1168,7 @@ def _executing_info(name):
         return None
     return {"verb": claim.verb, "pid": claim.pid,
             "workdir": claim.guest_workdir or claim.workdir,
+            "log": claim.log,
             "elapsed": time.time() - (claim.started or time.time())}
 
 
@@ -681,6 +1235,7 @@ class Claim:
         self.verb, self.force, self.ttl = verb, force, ttl
         self.fh = None
         self.pid = None       # set once the tracked subprocess actually starts
+        self.log = None       # where that subprocess writes, as the guest sees it
         self.started = None
         self.aborted = False  # set by kill_active(): skip the owner rewrite on release
 
@@ -773,6 +1328,7 @@ class Handler(BaseHTTPRequestHandler):
         self._reply(200, {
             "ok": True,
             "verbs": BUILTIN_VERBS,
+            "features": FEATURES,
             "lock_ttl": self.config.lock_ttl,
             "projects": {
                 name: {
@@ -781,6 +1337,10 @@ class Handler(BaseHTTPRequestHandler):
                     "executing": _executing_info(name),
                     "guest_mount": p["guest_mount"],
                     "defaults": p["defaults"],
+                    "pull": p["pull"],
+                    "simulators": None if p.get("simulators") is None else {
+                        sname: {**entry, "owner": read_owner(f"{name}@{sname}")}
+                        for sname, entry in read_sims(name).items()},
                     "commands": {
                         cname: {
                             "variants": sorted(c.get("variants", {})),
@@ -810,6 +1370,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._reply(400, {"error": f"verb must be one of {BUILTIN_VERBS}"})
             if verb == "lock":
                 return self._lock_verb(body)
+            if verb in DIRECT_VERBS:
+                return self._direct(verb, body)
             argv, timeout, extra, project = build_command(verb, body, self.config)
             lock_name = extra.pop("_lock", None)
             if lock_name:
@@ -834,12 +1396,56 @@ class Handler(BaseHTTPRequestHandler):
             if claim:
                 claim.release()
 
+    def _direct(self, verb, body):
+        """Run a direct verb. Creating or deleting a private simulator claims
+        that simulator, so a second checkout cannot delete one in use."""
+        claim, previous_owner, done = None, None, False
+        try:
+            project = self.config.project(body.get("project"))
+            base = resolve_workdir(body, project)
+            if verb in ("sim_create", "sim_delete") and self.config.lock_enabled:
+                sim_name = field(body, "name", SIM_NAME_RE)
+                previous_owner = read_owner(f"{project['name']}@{sim_name}")
+                claim = Claim(f"{project['name']}@{sim_name}", base, verb,
+                              bool(body.get("force")), self.config.lock_ttl,
+                              guest_workdir=to_guest_path(project, base)).acquire()
+            log(f"RUN {verb}: {body.get('name') or body.get('path') or ''}")
+            stdout, extra = DIRECT[verb](body, project, base)
+            done = True
+            log(f"DONE {verb}: exit=0")
+            return self._reply(200, {"verb": verb, "exit_code": 0,
+                                     "stdout": stdout, "stderr": "", **extra})
+        except Busy as exc:
+            log(f"BUSY {verb}: {exc}")
+            return self._reply(409, {"error": str(exc)})
+        except Rejected as exc:
+            log(f"REJECT {verb}: {exc}")
+            return self._reply(400, {"error": str(exc)})
+        except HostFailure as exc:
+            log(f"FAIL {verb}: {exc}")
+            return self._reply(200, {"verb": verb, "exit_code": exc.code,
+                                     "stdout": "", "stderr": str(exc)})
+        finally:
+            if claim and claim.fh is not None:
+                # A created simulator belongs to its creator and a deleted one to
+                # nobody. A request that failed changed nothing, so the record
+                # goes back to what it was before this request claimed it.
+                claim.aborted = not (done and verb == "sim_create")
+                claim.release()
+                if claim.aborted:
+                    if previous_owner and not done:
+                        write_owner(claim.name, previous_owner["workdir"],
+                                    previous_owner.get("verb"),
+                                    previous_owner.get("guest_workdir"))
+                    else:
+                        clear_owner(claim.name)
+
     def _lock_verb(self, body):
         """Inspect, hand back, or force-clear the claim. Never runs a subprocess
         itself -- `reset` stops the tracked subprocess of an in-flight command,
         which is what actually frees the execution lock (see kill_active)."""
         project = self.config.project(body.get("project"))
-        name = project["name"]
+        name = lock_name(project, resolve_sim(body, project))
         action = body.get("action")
         if action in ("release", "reset"):
             killed = kill_active(name, expected_pid=body.get("pid")) if action == "reset" else None
@@ -864,6 +1470,83 @@ class Handler(BaseHTTPRequestHandler):
                                  "stdout": describe_owner(name, self.config.lock_ttl),
                                  "stderr": ""})
 
+    def _execute_logged(self, verb, label, argv, timeout, extra, claim, cwd, env,
+                        logfile, detach, ready_url, ready_match, ready_app, server):
+        """Run a project command with its output in a log the guest can follow.
+
+        A plain command is done when it exits. A detached one (a bundler, or a
+        build that goes on to serve the bundle) is done when it reports ready,
+        and is then left running; exiting before that is its failure.
+        """
+        shown = extra.get("guest_log") or logfile
+        if ready_app:
+            # Stop the installed copy first, so "the app is running" below can
+            # only mean this command launched it.
+            subprocess.run(["xcrun", "simctl", "terminate", ready_app["udid"],
+                            ready_app["bundle_id"]], capture_output=True, timeout=60)
+        try:
+            with open_command_log(logfile) as fh:
+                # A new session so a reset or a timeout can kill the whole tree.
+                proc = subprocess.Popen(argv, cwd=cwd, env=env, stdout=fh,
+                                        stderr=subprocess.STDOUT, start_new_session=True)
+        except OSError as exc:
+            log(f"FAIL {label}: {type(exc).__name__}: {exc}")
+            return self._reply(502, {
+                "error": f"could not start {argv[0]!r} on the host: {exc}"})
+        if claim:
+            claim.pid, claim.log = proc.pid, shown
+
+        def is_ready():
+            if ready_url:
+                probe = subprocess.run(["curl", "-s", "-m", "2", ready_url],
+                                       capture_output=True, text=True)
+                if not probe.stdout or ready_match not in probe.stdout:
+                    return False
+            return not ready_app or app_running(ready_app["udid"], ready_app["bundle_id"])
+
+        deadline, code, ready = time.time() + timeout, None, False
+        while time.time() < deadline:
+            code = proc.poll()
+            if code is not None:
+                break
+            if detach and is_ready():
+                ready = True
+                break
+            time.sleep(1 if detach else 0.2)
+
+        if ready:
+            if server:
+                write_server({**server, "pid": proc.pid, "at": time.time(), "log": shown})
+            log(f"DONE {label}: ready, left running as pid {proc.pid}")
+            return self._reply(200, {"verb": verb, "exit_code": 0, "stdout": "ready",
+                                     "stderr": "", "log": shown, **extra})
+
+        timed_out = code is None
+        if timed_out:
+            kill_group(proc.pid)
+            proc.wait(timeout=10)
+        output = read_log_tail(logfile)
+        if claim and claim.aborted:
+            log(f"RESET {label}: exit={proc.returncode}")
+            return self._reply(200, {
+                "verb": verb, "exit_code": proc.returncode or 137, "stdout": output,
+                "stdout_is_log": True, "stderr": "killed by `mac-sim reset`",
+                "log": shown, **extra})
+        if timed_out:
+            log(f"TIMEOUT {label} after {timeout}s")
+            return self._reply(504, {
+                "error": f"{label} " + ("did not report ready" if detach else "did not finish")
+                         + f" within {timeout}s and was stopped; its output is in {shown}"})
+        if detach:
+            log(f"FAIL {label}: exited {code} before ready")
+            return self._reply(200, {
+                "verb": verb, "exit_code": code or 1, "stdout": output,
+                "stdout_is_log": True, "log": shown,
+                "stderr": f"{label} exited (code {code}) before it was ready", **extra})
+        log(f"DONE {label}: exit={code}")
+        self._reply(200, {"verb": verb, "exit_code": code, "stdout": output,
+                          "stdout_is_log": True, "stderr": "", "log": shown, **extra})
+
     def _execute(self, verb, body, argv, timeout, extra, claim=None):
         cwd = extra.pop("cwd", None)
         tail = extra.pop("tail", None)
@@ -874,38 +1557,16 @@ class Handler(BaseHTTPRequestHandler):
         detach = extra.pop("detach", False)
         ready_url = extra.pop("ready_url", None)
         ready_match = extra.pop("ready_match", "")
+        ready_app = extra.pop("ready_app", None)
+        server = extra.pop("server", None)
         logfile = extra.pop("log", None)
         label = body.get("command") or verb
         log(f"RUN {label}: {shlex.join(argv)}" + (f" (cwd={cwd})" if cwd else ""))
 
-        if detach:
-            # A server must outlive this request, so it runs in its own session
-            # with output to a log the caller can tail.
-            try:
-                with open(logfile, "wb") as fh:
-                    detached = subprocess.Popen(argv, cwd=cwd, env=env, stdout=fh,
-                                                stderr=subprocess.STDOUT, start_new_session=True)
-                if claim:
-                    claim.pid = detached.pid
-            except OSError as exc:
-                log(f"FAIL {label}: {type(exc).__name__}: {exc}")
-                return self._reply(502, {
-                    "error": f"could not start {argv[0]!r} on the host: {exc}"})
-            ready, deadline = not ready_url, time.time() + timeout
-            while ready_url and time.time() < deadline:
-                probe = subprocess.run(["curl", "-s", "-m", "2", ready_url],
-                                       capture_output=True, text=True)
-                if ready_match in probe.stdout and probe.stdout:
-                    ready = True
-                    break
-                time.sleep(1)
-            log(f"DONE {label}: ready={ready}")
-            return self._reply(200, {
-                "verb": verb, "exit_code": 0 if ready else 1,
-                "stdout": "ready" if ready else "",
-                "stderr": "" if ready else
-                          f"did not report ready within {timeout}s; see {logfile} on the host",
-                "log": logfile, **extra})
+        if logfile:
+            return self._execute_logged(verb, label, argv, timeout, extra, claim, cwd, env,
+                                        logfile, detach, ready_url, ready_match,
+                                        ready_app, server)
 
         try:
             # A new session so a reset can kill the whole tree (os.killpg below),

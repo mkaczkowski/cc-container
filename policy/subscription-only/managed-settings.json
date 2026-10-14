@@ -1,0 +1,4 @@
+{
+  "forceLoginMethod": "claudeai",
+  "allowedProviders": ["anthropic"]
+}

@@ -2,6 +2,61 @@
 
 ## Unreleased
 
+- Behind the proxy, Node's built-in `fetch`/`http`/`https` now reach the
+  network: the container sets `NODE_USE_ENV_PROXY=1` (warning silenced), and
+  `tinyproxy.conf` allows `CONNECT` to port 80, which Node uses for plain HTTP.
+  Add `ConnectPort 80` to an existing `~/.config/cc-container/tinyproxy.conf`.
+  `no_proxy`/`NO_PROXY` now also exempt the host bridge address.
+- Declarative global pi config: `~/.config/cc-container/pi/` (`settings.json`,
+  `keybindings.json`, `extensions/`, `prompts/`, `skills/`) is mounted at
+  `/opt/cc-pi` and merged into the guest's `~/.pi/agent` by
+  `guest/pi-config-sync` at every pi start. `pix -C <dir>` starts pi in a
+  subdirectory of the project.
+- The image ships the pi coding agent (`@earendil-works/pi-coding-agent`)
+  beside Claude Code: `pix` attaches it to the shared session, `pirun` runs it
+  one-off, `pi-container-upgrade` upgrades it. Its state lives in the same
+  `cc-home` volume, and `mcp-servers.json` is synced into its `mcp.json` too.
+  Rebuild the image (`cc-container-build`) to get it.
+- `fd` (Debian's `fd-find`) is in the image.
+- `CC_SUBSCRIPTION_ONLY=1`: only a Claude.ai subscription login is accepted.
+  Claude Code enforces it from a read-only managed policy
+  (`forceLoginMethod`, `allowedProviders`), which also covers
+  pi-claude-bridge; `guest/cc-subscription-guard` refuses to start pi while it
+  sees API keys, AWS credentials or a non-OAuth pi login.
+- `cc-container-build` remembers the Claude Code and pi versions of the last
+  build and reuses them for any it is not given, so upgrading one agent no
+  longer drops the other's pin. `cc-doctor` reports both versions.
+- A project command's output is written to `.mac-sim/logs/<command>.log` in the
+  calling checkout while it runs, and the CLI prints it live (`-q` for the end
+  only). Before, a long build was one silent request until the host finished.
+- `ready_app`: a detached command is ready once the app has a live process on
+  the device. Declare a build that then serves the bundle (`expo run:ios`) as
+  `detach` + `ready_url` + `ready_app`: as a plain command it never exited, so
+  it held the request and the claim (refusing `launch`, `openurl`, ...) until
+  its 40 minute timeout. **Update your host config**; see
+  `examples/expo-monorepo.mac-sim.json`.
+- A detached command that exits before it is ready now fails at once with its
+  output, and one that is not ready in time is stopped instead of left running.
+- `mac-sim status`: device, claim, what is executing, the bundler and the build
+  profile it was started with, and whether the app is running; exits 0 only
+  when the app is ready to drive.
+- `mac-sim logs` shows the app's own process by default; `--all` for the whole
+  simulator log.
+- `log` now defaults to the checkout rather than `/tmp` on the host.
+- `mac-sim sim create|list|delete`: private simulators, so two checkouts verify
+  at the same time. Each gets a copy of the app installed on the shared device,
+  its own bundler port (`{port}`) and its own claim; `--sim <name>` targets one
+  on any command. Opt-in per project through a `simulators` block.
+- `mac-sim appearance [light|dark]`, `mac-sim launch --locale <lang>`, and
+  `mac-sim pull <alias|path> [out]` (a file from the app's data container; a
+  SQLite database arrives as one consistent snapshot).
+- `kill_port`, `ready_url` and `log` are rendered like `argv`, and `kill_port`
+  now kills the port's listener only, not its clients.
+- Fixed: an option written before a built-in subcommand (`mac-sim -d "iPhone 16"
+  boot`) was dropped, so the command ran against the default device.
+- The CLI now says so when the running shim predates a verb or option, instead
+  of the shim silently ignoring the field.
+
 First public release.
 
 - Claude Code in an `apple/container` VM: one-off (`ccrun`) and shared

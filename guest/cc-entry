@@ -6,5 +6,6 @@
 # without a rebuild. A sync failure is fatal: starting a session that silently
 # lacks its MCP servers is worse than not starting.
 set -e
+[ "${CC_SUBSCRIPTION_ONLY:-0}" = "1" ] && /opt/cc-tools/cc-subscription-guard
 /opt/cc-tools/cc-mcp-sync
 exec claude "$@"

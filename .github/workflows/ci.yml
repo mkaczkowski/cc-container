@@ -11,11 +11,12 @@ jobs:
         run: |
           sudo apt-get update && sudo apt-get install -y zsh shellcheck
           bash -n bin/cc-container.sh install.sh guest/statusline.sh
+          sh -n guest/cc-entry guest/pi-entry
           zsh -n bin/cc-container.sh
           shellcheck -s bash -S warning bin/cc-container.sh install.sh guest/statusline.sh
 
       - name: Python
-        run: python3 -m py_compile guest/cc-mcp-sync
+        run: python3 -m py_compile guest/cc-mcp-sync guest/cc-subscription-guard guest/pi-config-sync
 
       - name: JSON
         run: |
@@ -39,6 +40,16 @@ jobs:
           fi
           if git ls-files | grep -qE '(^|/)(mcp\.env|config\.sh)$'; then
             echo "::error::a user config file is tracked; it belongs in ~/.config"
+            exit 1
+          fi
+          echo "clean"
+
+      - name: Agent instructions live in AGENTS.md only
+        # Claude Code loads AGENTS.md only for a project with no CLAUDE.md of
+        # its own, so a tracked CLAUDE.md would hide AGENTS.md from it.
+        run: |
+          if git ls-files | grep -E '(^|/)CLAUDE\.md$'; then
+            echo "::error::a CLAUDE.md is tracked; move its content into AGENTS.md and delete it"
             exit 1
           fi
           echo "clean"

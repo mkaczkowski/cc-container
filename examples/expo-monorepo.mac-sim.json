@@ -17,40 +17,63 @@
         "device": "iPhone 17 Pro",
         "bundle_id": "com.example.myapp",
         "workspace": "apps/mobile/ios/MyApp.xcworkspace",
-        "scheme": "MyApp"
+        "scheme": "MyApp",
+        "port": 8081
       },
+
+      "//s": "Private simulators (`mac-sim sim create <name>`): a copy of the app",
+      "//s1": "installed on the shared device, its own Metro port from port_base up,",
+      "//s2": "the deep-link approval so openurl does not prompt, and RCT_jsLocation",
+      "//s3": "in the GLOBAL domain so clearState flows keep loading from that port.",
+      "simulators": {
+        "max": 3,
+        "port_base": 8090,
+        "clone_app": true,
+        "copy_prefs": ["com.apple.launchservices.schemeapproval.plist"],
+        "global_defaults": { "RCT_jsLocation": "localhost:{port}" }
+      },
+
+      "//p": "Files `mac-sim pull <alias>` copies out of the app's data container.",
+      "pull": {
+        "db": "Documents/SQLite/myapp.db"
+      },
+
 
       "commands": {
         "run": {
           "argv": ["pnpm", "--filter", "@myapp/mobile", "exec",
-                   "expo", "run:ios", "--device", "{udid}"],
+                   "expo", "run:ios", "--device", "{udid}", "--port", "{port}"],
           "cwd": "apps/mobile",
+          "//": "expo run:ios never exits: once the app is launched it is the bundler.",
+          "//1": "So it is detached, and done when the bundler answers AND the app runs.",
+          "detach": true,
+          "kill_port": "{port}",
+          "ready_url": "http://localhost:{port}/status",
+          "ready_match": "packager-status:running",
+          "ready_app": true,
           "timeout": 2400,
           "path_prepend": ["~/.gem/ruby/4.0.0/bin"],
           "env": { "SENTRY_DISABLE_AUTO_UPLOAD": "true" },
           "variants": {
             "e2e": {
-              "env": { "EXPO_PUBLIC_E2E": "true" },
-              "kill_port": 8081
+              "env": { "EXPO_PUBLIC_E2E": "true" }
             },
             "demo": {
               "argv": ["pnpm", "--filter", "@myapp/mobile", "run",
-                       "ios:demo", "--device", "{udid}"],
-              "env": { "EXPO_PUBLIC_E2E": "true", "EXPO_PUBLIC_DEMO_MODE": "true" },
-              "kill_port": 8081
+                       "ios:demo", "--device", "{udid}", "--port", "{port}"],
+              "env": { "EXPO_PUBLIC_E2E": "true", "EXPO_PUBLIC_DEMO_MODE": "true" }
             }
           }
         },
 
         "metro": {
           "argv": ["pnpm", "--filter", "@myapp/mobile", "exec",
-                   "expo", "start", "--port", "8081"],
+                   "expo", "start", "--port", "{port}"],
           "cwd": "apps/mobile",
           "detach": true,
-          "kill_port": 8081,
-          "ready_url": "http://localhost:8081/status",
+          "kill_port": "{port}",
+          "ready_url": "http://localhost:{port}/status",
           "ready_match": "packager-status:running",
-          "log": "/tmp/metro.log",
           "timeout": 120,
           "variants": {
             "e2e":  { "env": { "EXPO_PUBLIC_E2E": "true" } },
@@ -59,7 +82,7 @@
         },
 
         "e2e": {
-          "argv": ["~/.maestro/bin/maestro", "test", "{flow}"],
+          "argv": ["~/.maestro/bin/maestro", "--device", "{udid}", "test", "{flow}"],
           "timeout": 3600,
           "path_prepend": ["/Library/Java/JavaVirtualMachines/temurin-17.jdk/Contents/Home/bin"],
           "env": { "JAVA_HOME": "/Library/Java/JavaVirtualMachines/temurin-17.jdk/Contents/Home" },
