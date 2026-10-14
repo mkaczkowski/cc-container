@@ -49,8 +49,11 @@ cc-container-build         # build the image (a few minutes)
 cc-doctor                  # check prerequisites, probe guest network egress
 ```
 
-First run only: `/login` inside the container. Credentials land in the `cc-home`
-volume, so later runs start authenticated.
+First run only: `/login` inside the container, once per agent (`ccrun` for
+Claude Code, `pirun` for pi). Credentials land in the `cc-home` volume, so later
+runs start authenticated. Optional features (pi config, the Xcode bridge, your
+own image layer) need files `install.sh` does not create; see
+[Configuration](#configuration).
 
 ## Usage
 
@@ -429,15 +432,40 @@ config in `~/.config/cc-container/pi/` instead (below).
 
 ## Configuration
 
-Everything user-specific lives in `~/.config/cc-container/`; nothing in the repo
-needs editing. `install.sh` seeds it from `config/*.example.*`.
+Everything user-specific lives outside the repo, mostly in
+`~/.config/cc-container/`; nothing in the repo needs editing. `install.sh` seeds
+the files every setup needs. The rest are opt-in, and you create them yourself.
 
-| File | Purpose |
-|---|---|
-| `config.sh` | Image, resources, proxy mode, extra mounts, defaults |
-| `mcp/mcp-servers.json` | Declarative MCP servers, synced into the guest's user scope |
-| `mcp.env` | Secrets the above references as `${VAR}` (chmod 600, never inline) |
-| `tinyproxy.conf` | Only used where guests have no direct egress |
+| Path in `~/.config/cc-container/` | Created by `install.sh` | Purpose |
+|---|---|---|
+| `config.sh` | yes | Image, resources, proxy mode, extra mounts, defaults |
+| `mcp/mcp-servers.json` | yes | Declarative MCP servers, synced into both agents' user scope ([MCP servers](#mcp-servers)) |
+| `mcp.env` | yes | Secrets the above references as `${VAR}` (chmod 600, never inline) |
+| `tinyproxy.conf` | yes | Only used where guests have no direct egress |
+| `pi/` | no | Global pi config ([Running pi](#running-pi-beside-claude-code)); mounted only if it exists when a container starts |
+| `mac-sim.json` | no | The opt-in Xcode bridge, from `config/mac-sim.example.json` ([Driving the Mac's Xcode toolchain](#driving-the-macs-xcode-toolchain-from-the-guest)) |
+| `Dockerfile.local` | no | Your own layer on top of the image ([Adding tools](#adding-tools-to-the-image)) |
+
+Nothing else in that directory is read automatically. A directory of your own
+guest tools needs a `CC_EXTRA_VOLUME_ARGS` entry in `config.sh` (see
+[Extending it](#extending-it-with-your-own-host-tooling)).
+
+Outside it:
+
+- **Your shell rc** gets one `source` line from `install.sh`
+  (`./install.sh --uninstall` removes it).
+- **`~/.local/state/cc-container/`** is written by the wrapper itself: the
+  versions `cc-container-build` reuses, the proxy's pid and log, the mac-sim
+  token and log. Nothing to set up.
+- **The `cc-home` volume** is the container's home directory: both agents'
+  logins, pi packages installed with `pix install`, the container's own Claude
+  Code settings (such as the [statusline](#statusline)), and trust decisions. It
+  survives `ccdown` and rebuilds. Deleting it (`container volume delete
+  cc-home`) means logging in and redoing those steps.
+
+On a new Mac, copy `~/.config/cc-container/` from the old one, run `./install.sh`
+(it keeps existing files), `cc-container-build`, and log in again: the
+`cc-home` volume does not move with the config.
 
 Resources default to **half the host's cores and half its RAM** (floor 1 cpu /
 4 GB). Override in `config.sh` or per invocation:
@@ -540,9 +568,14 @@ appear. It uses 16-colour ANSI only, so it reads correctly in any terminal theme
 and it always prints a line: a missing field or a failed `git` call degrades that
 part rather than blanking the status.
 
-To customise it, copy it to `~/.config/cc-container/local/` (mounted at
-`/opt/cc-local`, also on the guest `PATH`) and point the command there instead.
-Updates will never overwrite it in that location.
+To customise it, copy it into a directory of your own, mount that at
+`/opt/cc-local` (also on the guest `PATH`) from `config.sh`, and point the
+command there instead. Updates never touch that directory. Nothing mounts it
+for you:
+
+```bash
+CC_EXTRA_VOLUME_ARGS+=( --volume "${CC_CONFIG_DIR}/local:/opt/cc-local:ro" )
+```
 
 ## Driving the Mac's Xcode toolchain from the guest
 

@@ -73,4 +73,6 @@ Next:
   4. cc-doctor               # check prerequisites and probe guest egress
   5. cd <a project> && ccrun # first run only: /login inside the container
                              # (pirun for pi, which has its own /login)
+  6. Optional: pi config, the Xcode bridge and Dockerfile.local need files
+     this script does not create; see README "Configuration".
 TXT

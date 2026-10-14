@@ -59,3 +59,6 @@ agent state that the user also edits by hand. Keep their contract:
 - CI cannot run the VM, so say in the PR what you ran by hand.
 - Add an entry under `## Unreleased` in `CHANGELOG.md` for user-visible
   changes, and update `README.md` when a command or a config file changes.
+- Anything new the wrapper reads or writes outside the repo (a config file, a
+  state file, something kept in the `cc-home` volume) goes into the lists under
+  Configuration in `README.md`, so a fresh setup knows it exists.
