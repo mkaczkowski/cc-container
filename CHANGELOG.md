@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Session commands (`ccx`, `pix`, `ccxs`, `ccrun`, `pirun`, `ccsh`) run under
+  `caffeinate -i`: idle sleep no longer suspends the VM during an unattended
+  agent run.
 - Behind the proxy, Node's built-in `fetch`/`http`/`https` now reach the
   network: the container sets `NODE_USE_ENV_PROXY=1` (warning silenced), and
   `tinyproxy.conf` allows `CONNECT` to port 80, which Node uses for plain HTTP.

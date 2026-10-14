@@ -87,6 +87,16 @@ ccx mcp list                         # subcommands work
 ccxs -c 'npm test'                   # bash, not claude
 ```
 
+### The Mac stays awake while a session runs
+
+Every session command (`ccx`, `pix`, `ccxs`, `ccrun`, `pirun`, `ccsh`) runs
+under `caffeinate -i`, so idle sleep cannot suspend the VM in the middle of an
+unattended agent run. The Mac sleeps as usual once the session ends. A closed
+lid still sleeps the Mac unless it is on power with an external display.
+
+The session still ends with its terminal. For a run you want to leave and come
+back to, start `pix`/`ccx` inside tmux on the Mac and detach.
+
 ### `--dangerously-skip-permissions` is the default
 
 `ccx` and `ccrun` add it automatically. That is the point of the container: the

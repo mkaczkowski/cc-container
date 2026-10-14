@@ -431,6 +431,13 @@ _cc_call_hook() {
 # ---------------------------------------------------------------------------
 # One-off sessions
 # ---------------------------------------------------------------------------
+# Keeps the Mac out of idle sleep while a session runs, then lets it sleep as
+# usual. Nothing in the VM can assert this (the guest has no caffeinate), and
+# idle sleep suspends the VM, so an unattended agent run would stop a minute
+# after the last keypress on a Mac with a short sleep timer. A closed lid still
+# sleeps unless the Mac is on power with an external display.
+_cc_awake() { caffeinate -i "$@"; }
+
 _cc_run() {
   local entrypoint_args=() default_flags=()
   case "$1" in
@@ -457,7 +464,7 @@ _cc_run() {
   # -it needs a real TTY; fall back for piped/scripted use (e.g. claude -p).
   local tty_args=()
   if [ -t 0 ] && [ -t 1 ]; then tty_args=(-it); fi
-  container run --rm "${tty_args[@]}" \
+  _cc_awake container run --rm "${tty_args[@]}" \
     --volume "${PWD}:/workspace" \
     --volume "cc-home:/root" \
     --volume "${CC_CONTAINER_REPO}/guest:/opt/cc-tools:ro" \
@@ -547,7 +554,7 @@ cc-attach() {
   # The mount is fixed at cc-up, so a NEW ${VAR} still needs cc-down && cc-up.
   _cc_attach_guard || return 1
   container exec "${CC_SESSION_NAME}" /opt/cc-tools/cc-mcp-sync || return 1
-  container exec "${tty_args[@]}" --env TERM --workdir /workspace \
+  _cc_awake container exec "${tty_args[@]}" --env TERM --workdir /workspace \
     "${CC_SESSION_NAME}" claude ${default_flags+"${default_flags[@]}"} "$@"
 }
 
@@ -569,7 +576,7 @@ pi-attach() {
     workdir="/workspace/${2:?pi-attach: -C needs a directory relative to the project root}"
     shift 2
   fi
-  container exec "${tty_args[@]}" --env TERM --workdir "${workdir}" \
+  _cc_awake container exec "${tty_args[@]}" --env TERM --workdir "${workdir}" \
     "${CC_SESSION_NAME}" pi "$@"
 }
 
@@ -580,7 +587,7 @@ cc-attach-shell() {
   fi
   local tty_args=()
   if [ -t 0 ] && [ -t 1 ]; then tty_args=(-it); fi
-  container exec "${tty_args[@]}" --env TERM --workdir /workspace \
+  _cc_awake container exec "${tty_args[@]}" --env TERM --workdir /workspace \
     "${CC_SESSION_NAME}" /bin/bash "$@"
 }
 
