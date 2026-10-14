@@ -206,6 +206,65 @@ Use `{udid}` and `{port}`, including in `kill_port`, `ready_url` and `log`, whic
 are rendered like `argv`. Pin a test runner to `{udid}` as well: with two
 simulators booted, "the booted one" is no longer one device.
 
+## The Android emulator
+
+The Android emulator needs a hypervisor the guest does not have, so it runs on
+the Mac as well, next to the SDK that builds for it. A project that declares an
+`android` block gets the same verbs against an emulator there:
+
+```json
+"android": {
+  "sdk": "/opt/homebrew/share/android-commandlinetools",
+  "java_home": "/Library/Java/JavaVirtualMachines/temurin-17.jdk/Contents/Home",
+  "avd": "Pixel_8_API_35",
+  "console_port": 5560,
+  "port": 8097,
+  "emulator_args": ["-no-window", "-no-audio", "-read-only", "-no-boot-anim"]
+}
+```
+
+```
+mac-sim android list                      # AVDs, and what adb has attached
+mac-sim android boot                      # start the AVD headless; returns once booted
+mac-sim android install path/to/app.apk
+mac-sim android launch [--locale pl]      # a per-app locale, Android 13+
+mac-sim android terminate | uninstall
+mac-sim android openurl "myapp://"
+mac-sim android appearance [light|dark]
+mac-sim android screenshot .mac-sim/a.png
+mac-sim android logs --lines 300          # logcat of the app's pid; --all for everything
+mac-sim android status                    # emulator, claim, bundler, app; exit 0 = ready
+mac-sim android lock | release | reset
+mac-sim android shutdown
+mac-sim android run --profile e2e         # any other word: the "android-run" command
+```
+
+- **One emulator per project, fixed by `console_port`.** Its adb serial is
+  `emulator-<console_port>`, and every adb call names it, so another device on
+  the Mac is never the one acted on. Pick a port other than 5554, which an
+  emulator started by hand takes, and add `-read-only` to `emulator_args` if
+  both may run the same AVD at once (it also means nothing installed survives a
+  shutdown). The port must be even, in 5554..5682.
+- **Its own claim**, `<project>@android`, with the same rules as the simulator's.
+  An Android run never waits on an iOS one, or the other way around.
+- **`package`** defaults to `defaults.bundle_id`; set it when the two differ.
+  **`port`** is the bundler port the Android commands get as `{port}`; give it
+  its own, so an iOS bundler and an Android one can both run.
+- **`status`** reports whether the installed build is debuggable: a debug build
+  is not ready without its bundler, a release build embeds its bundle.
+- `logs` takes `--lines` only (logcat has no time window here), and filters by
+  the app's pid, so the app must be running unless you pass `--all`.
+- Not for Android: `--sim`, `pull`, `build`, `runtimes`, `gui`.
+
+**Project commands** declare `"platform": "android"` to run there: they take the
+Android claim, get `{serial}`, `{avd}`, `{package}`, `{android_home}` and the
+Android `{port}`, and run with `ANDROID_HOME`, `JAVA_HOME` and the SDK's tools on
+`PATH`. `ready_app` waits for the app's process on the emulator. Name them
+`android-<word>` and the CLI reads `mac-sim android <word>` as that command, so
+`mac-sim android run --profile e2e` is `android-run`. A word that is also a
+built-in (`release`, `status`, ...) always means the built-in, so do not name a
+command `android-release`.
+
 **A worktree's first native build is slow.** `apps/mobile/ios/` and friends are
 gitignored, so a fresh checkout has no native project and `expo run:ios` prebuilds
 and runs `pod install` from scratch. That is correct, just not quick.
@@ -256,6 +315,13 @@ A command is an argv template plus its environment:
   `false` for one that reads state without touching the device or a shared port.
 - **`optional_argv`** appends only when a param is non-empty, so an unset
   optional flag leaves no stray empty argument.
+- **`platform`** (`"ios"`, the default, or `"android"`) picks the device, the
+  claim and the bundler port; see [The Android emulator](#the-android-emulator).
+- **`private_tmp`** gives the command its own `TMPDIR`, one per project, command
+  and variant, under `~/.local/state/cc-container/mac-sim-tmp/`. Use it for a
+  bundler that caches under `TMPDIR` by file content and not by the env flags it
+  inlines: sharing one cache, a release build of one variant can ship another's
+  bundle.
 - **`variants`** overlay the base spec: `argv` is replaced, `env` is merged.
   Use them for build profiles. `--profile` selects one, unless the command
   declares a parameter of that name.

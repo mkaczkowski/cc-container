@@ -39,6 +39,18 @@
       },
 
 
+      "//a": "The Android emulator (`mac-sim android ...`). A fixed console port",
+      "//a1": "fixes its adb serial (emulator-5560) and keeps it off the 5554 an",
+      "//a2": "emulator started by hand takes; -read-only lets both run one AVD.",
+      "android": {
+        "sdk": "~/Library/Android/sdk",
+        "java_home": "/Library/Java/JavaVirtualMachines/temurin-17.jdk/Contents/Home",
+        "avd": "Pixel_8_API_35",
+        "console_port": 5560,
+        "port": 8097,
+        "emulator_args": ["-no-window", "-no-audio", "-read-only", "-no-boot-anim"]
+      },
+
       "commands": {
         "run": {
           "argv": ["pnpm", "--filter", "@myapp/mobile", "exec",
@@ -86,6 +98,46 @@
           "timeout": 3600,
           "path_prepend": ["/Library/Java/JavaVirtualMachines/temurin-17.jdk/Contents/Home/bin"],
           "env": { "JAVA_HOME": "/Library/Java/JavaVirtualMachines/temurin-17.jdk/Contents/Home" },
+          "params": {
+            "flow": { "path": true, "must_exist": true, "default": ".maestro" },
+            "tags": { "pattern": "^[A-Za-z0-9_,-]{1,64}$", "default": "" }
+          },
+          "optional_argv": [
+            { "when": "tags", "argv": ["--include-tags", "{tags}"] }
+          ]
+        },
+
+        "android-run": {
+          "//": "`mac-sim android run`: an android-* command runs on the emulator,",
+          "//1": "under its claim, with {serial} {avd} {package} and the android {port}.",
+          "platform": "android",
+          "argv": ["pnpm", "--filter", "@myapp/mobile", "exec",
+                   "expo", "run:android", "--device", "{avd}", "--port", "{port}"],
+          "cwd": "apps/mobile",
+          "detach": true,
+          "kill_port": "{port}",
+          "ready_url": "http://localhost:{port}/status",
+          "ready_match": "packager-status:running",
+          "ready_app": true,
+          "timeout": 2400,
+          "variants": { "e2e": { "env": { "EXPO_PUBLIC_E2E": "true" } } }
+        },
+
+        "android-build": {
+          "//": "A release APK. private_tmp gives each variant its own TMPDIR, where",
+          "//1": "Metro keeps a cache that ignores the EXPO_PUBLIC_* flags it inlines.",
+          "platform": "android",
+          "argv": ["./gradlew", "app:assembleRelease"],
+          "cwd": "apps/mobile/android",
+          "timeout": 5400,
+          "private_tmp": true,
+          "variants": { "e2e": { "env": { "EXPO_PUBLIC_E2E": "true" } } }
+        },
+
+        "android-e2e": {
+          "platform": "android",
+          "argv": ["~/.maestro/bin/maestro", "--device", "{serial}", "test", "{flow}"],
+          "timeout": 3600,
           "params": {
             "flow": { "path": true, "must_exist": true, "default": ".maestro" },
             "tags": { "pattern": "^[A-Za-z0-9_,-]{1,64}$", "default": "" }

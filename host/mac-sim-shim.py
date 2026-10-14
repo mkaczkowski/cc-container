@@ -18,6 +18,11 @@ Two kinds of verb:
     fixed host steps behind one request, so they are functions here rather than
     one argv.
 
+A request carrying "platform": "android" is served from the project's `android`
+block instead: the same verbs (boot, install, screenshot, logs, ...) mapped onto
+the Android SDK's `emulator` and `adb`, under a claim of their own, so an
+emulator run never contends with the iOS simulator.
+
 A project command's output goes to a log inside the caller's checkout
 (.mac-sim/logs/<command>.log) while it runs, so the guest can follow a build
 that takes minutes instead of waiting on a silent request.
@@ -90,6 +95,7 @@ LAST_RE = re.compile(r"^\d{1,4}[smh]$")
 SIM_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,31}$")
 LOCALE_RE = re.compile(r"^[A-Za-z]{2,3}([_-][A-Za-z0-9]{2,8}){0,2}$")
 EXECUTABLE_RE = re.compile(r"^[A-Za-z0-9._ -]{1,64}$")
+AVD_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 
 BUILTIN_VERBS = [
     "list", "booted", "runtimes", "boot", "shutdown", "open_simulator_ui",
@@ -104,7 +110,8 @@ DIRECT_VERBS = {"sim_create", "sim_delete", "sim_list", "pull", "status"}
 # Request fields an older shim would silently ignore, turning "act on my private
 # simulator" into "act on the shared one". The guest checks this list before
 # sending such a field, so a stale shim is reported instead of obeyed wrongly.
-FEATURES = ["appearance", "locale", "pull", "sim", "progress", "status"]
+FEATURES = ["appearance", "locale", "pull", "sim", "progress", "status", "android",
+            "android_devices"]
 
 # Verbs that need no project context: they describe the Mac, not a checkout.
 GLOBAL_VERBS = {"list", "booted", "runtimes", "open_simulator_ui"}
@@ -114,6 +121,20 @@ GLOBAL_VERBS = {"list", "booted", "runtimes", "open_simulator_ui"}
 # deliberately absent: blocking it would break debugging for no safety gain.
 EXCLUSIVE_BUILTINS = {"boot", "shutdown", "install", "uninstall", "launch",
                       "terminate", "openurl", "appearance", "xcodebuild"}
+
+# What a "platform": "android" request may ask for. The direct ones are several
+# adb steps (or binary output) behind one request; none of them changes state.
+ANDROID_VERBS = {"list", "boot", "shutdown", "install", "uninstall", "launch",
+                 "terminate", "screenshot", "openurl", "appearance", "logs",
+                 "status", "lock", "project_command"}
+ANDROID_DIRECT = {"list", "screenshot", "logs", "status"}
+
+# Per-command TMPDIRs (`"private_tmp": true`), outside every checkout so a
+# bundler's file crawler never sees them.
+TMP_DIR = Path(os.environ.get(
+    "MAC_SIM_TMP_DIR",
+    os.path.expanduser("~/.local/state/cc-container/mac-sim-tmp"),
+))
 
 
 class Rejected(Exception):
@@ -169,6 +190,8 @@ class Config:
             sims = entry.get("simulators")
             if sims is not None and not isinstance(sims, dict):
                 raise ValueError(f"project {name}: 'simulators' must be an object")
+            if entry.get("android") is not None:
+                entry["android"] = parse_android(name, entry["android"], entry["defaults"])
             self.projects[name] = entry
         if not self.projects:
             raise ValueError("config declares no projects")
@@ -185,6 +208,72 @@ class Config:
         if name not in self.projects:
             raise Rejected(f"unknown project: {name!r}")
         return self.projects[name]
+
+
+def parse_emulator(name, dname, raw, base):
+    """One emulator: its AVD and the console port that fixes its adb serial."""
+    avd = raw.get("avd")
+    if not isinstance(avd, str) or not AVD_RE.match(avd):
+        raise ValueError(f"project {name}: android device {dname!r}: avd missing or "
+                         f"invalid: {avd!r}")
+    console = int(raw.get("console_port", 5554))
+    # The emulator takes the console port and the next one, and adb only scans
+    # even ports in this range; anything else gets a serial adb never lists.
+    if console % 2 or not 5554 <= console <= 5682:
+        raise ValueError(f"project {name}: android device {dname!r}: console_port must "
+                         f"be an even number in 5554..5682, got {console}")
+    args = raw.get("emulator_args", base["emulator_args"])
+    if not isinstance(args, list) or not all(isinstance(a, str) for a in args):
+        raise ValueError(f"project {name}: android device {dname!r}: emulator_args "
+                         f"must be a list of strings")
+    return {"avd": avd, "console_port": console, "serial": f"emulator-{console}",
+            "port": raw.get("port", base["port"]), "emulator_args": args}
+
+
+def parse_android(name, raw, defaults):
+    """Validate a project's `android` block once, at startup, so a typo in the
+    SDK path is a refusal to start rather than a confusing failure mid-request.
+
+    Either one emulator (`avd`, `console_port` at the top level) or several in
+    `devices`, keyed by a name the caller picks with `-d`; the shared fields
+    (sdk, java_home, package, port, emulator_args) are their defaults."""
+    if not isinstance(raw, dict):
+        raise ValueError(f"project {name}: 'android' must be an object")
+    sdk = Path(os.path.expanduser(raw.get("sdk", "") or "")).resolve()
+    if not raw.get("sdk") or not (sdk / "platform-tools" / "adb").exists():
+        raise ValueError(f"project {name}: android.sdk must be an Android SDK root "
+                         f"containing platform-tools/adb, got {raw.get('sdk')!r}")
+    package = raw.get("package", defaults.get("bundle_id"))
+    if not isinstance(package, str) or not BUNDLE_RE.match(package):
+        raise ValueError(f"project {name}: android.package missing or invalid: {package!r}")
+    java_home = raw.get("java_home")
+    if java_home and not Path(os.path.expanduser(java_home)).is_dir():
+        raise ValueError(f"project {name}: android.java_home does not exist: {java_home}")
+    base = {"port": raw.get("port"), "emulator_args": raw.get("emulator_args", [])}
+    if "devices" in raw:
+        if not isinstance(raw["devices"], dict) or not raw["devices"]:
+            raise ValueError(f"project {name}: android.devices must be a non-empty object")
+        devices = {}
+        for dname, draw in raw["devices"].items():
+            if not SIM_NAME_RE.match(dname):
+                raise ValueError(f"project {name}: android device name invalid: {dname!r}")
+            devices[dname] = parse_emulator(name, dname, draw, base)
+        default = raw.get("default", next(iter(devices)))
+        if default not in devices:
+            raise ValueError(f"project {name}: android.default {default!r} is not one of "
+                             f"{sorted(devices)}")
+    else:
+        default = "default"
+        devices = {default: parse_emulator(name, default, raw, base)}
+    serials = [d["serial"] for d in devices.values()]
+    if len(set(serials)) != len(serials):
+        raise ValueError(f"project {name}: two android devices share a console_port")
+    return {
+        "sdk": sdk, "package": package,
+        "java_home": os.path.expanduser(java_home) if java_home else None,
+        "boot_timeout": int(raw.get("boot_timeout", 600)),
+        "devices": devices, "default": default,
+    }
 
 
 def load_config(path):
@@ -431,6 +520,17 @@ def project_command(body, project, base, sim=None):
         raise Rejected(f"project {project['name']!r} declares no command {name!r}; "
                        f"available: {sorted(commands) or 'none'}")
     spec = merge_variant(commands[name], body.get("variant"))
+    # The config decides a command's platform, never the caller: it picks the
+    # claim, the device and the bundler port the command runs against.
+    platform = spec.get("platform", "ios")
+    if platform not in ("ios", "android"):
+        raise Rejected(f"command {name!r} declares an unknown platform {platform!r}")
+    if body.get("platform") not in (None, platform):
+        raise Rejected(f"command {name!r} is an {platform} command; "
+                       f"run it without the {body['platform']} prefix")
+    android = android_config(project, body) if platform == "android" else None
+    if android and sim:
+        raise Rejected(f"command {name!r} runs on the Android emulator; drop --sim")
 
     defaults = project["defaults"]
     values = {
@@ -451,11 +551,16 @@ def project_command(body, project, base, sim=None):
         "port": sim["port"] if sim else defaults.get("port"),
         "sim": sim["name"] if sim else "",
     }
+    if android:
+        values.update({"serial": android["serial"], "avd": android["avd"],
+                       "package": android["package"], "port": android["port"],
+                       "android_home": str(android["sdk"]),
+                       "android_device": android["name"]})
     # Only resolve a UDID when the template actually asks for one: it costs a
     # simctl call and would fail on a machine with no matching simulator.
     templates = spec.get("argv", []) + [part for extra in spec.get("optional_argv", [])
                                         for part in extra.get("argv", [])]
-    if any("{udid}" in part for part in templates):
+    if not android and any("{udid}" in part for part in templates):
         values["udid"] = resolve_device(body, project)
 
     # Declared parameters, each validated by its own regex. Anything the caller
@@ -500,14 +605,23 @@ def project_command(body, project, base, sim=None):
     if spec.get("cwd"):
         cwd = safe_path(spec["cwd"], project, base=base, must_exist=True)
 
-    env = dict(os.environ)
+    env = android_env(android) if android else dict(os.environ)
     for prefix in spec.get("path_prepend", []):
         env["PATH"] = f"{os.path.expanduser(prefix)}:{env.get('PATH', '')}"
     env.update({k: str(v) for k, v in spec.get("env", {}).items()})
+    if spec.get("private_tmp"):
+        # A bundler that caches under TMPDIR keys that cache by file content, not
+        # by the env flags it inlines, so a build variant sharing the default
+        # TMPDIR can silently ship another variant's bundle. One directory per
+        # project, command and variant keeps them apart and keeps reuse.
+        tmp = TMP_DIR / project["name"] / "-".join(filter(None, [name, body.get("variant")]))
+        tmp.mkdir(parents=True, exist_ok=True)
+        env["TMPDIR"] = str(tmp)
 
     # Project commands hold the claim by default: most of them build, install,
     # or drive the simulator. Declare "exclusive": false for the read-only ones.
-    extra = {"cwd": str(cwd), "env": env, "_exclusive": bool(spec.get("exclusive", True))}
+    extra = {"cwd": str(cwd), "env": env, "_exclusive": bool(spec.get("exclusive", True)),
+             "_platform": platform}
     # Rendered like argv, so a command can free and probe "{port}" and stay
     # correct on a private simulator.
     if spec.get("kill_port"):
@@ -521,12 +635,19 @@ def project_command(body, project, base, sim=None):
     if spec.get("log"):
         extra["log"] = render(spec["log"], values)
     elif extra["_exclusive"] or spec.get("detach"):
-        extra["log"] = str(command_log_path(project, base, name, sim))
+        # Named like a private simulator's, so two emulators running one command
+        # never share a log: <command>@<device>.log, except on the default one.
+        suffix = sim
+        if android and android["name"] != android["default"]:
+            suffix = {"name": android["name"]}
+        extra["log"] = str(command_log_path(project, base, name, suffix))
     if spec.get("detach"):
         extra["detach"] = True
         extra["ready_url"] = render(spec["ready_url"], values) if spec.get("ready_url") else None
         extra["ready_match"] = spec.get("ready_match", "")
-        if spec.get("ready_app"):
+        if spec.get("ready_app") and android:
+            extra["ready_app"] = {"adb": adb_base(android), "package": android["package"]}
+        elif spec.get("ready_app"):
             # Ready only once the app is running on the device: a build that
             # also serves the bundle never exits, so its exit cannot be the signal.
             if not values["bundle_id"]:
@@ -558,15 +679,23 @@ def build_command(verb, body, config):
     sim = resolve_sim(body, project)
     if sim:
         body = {**body, "udid": sim["udid"]}
-    argv, timeout, extra = dispatch(verb, body, project, base, sim)
+    if body.get("platform") == "android" and verb != "project_command":
+        if sim:
+            raise Rejected("--sim names an iOS simulator; it does not apply to Android")
+        argv, timeout, extra = android_dispatch(verb, body, project, base)
+    else:
+        argv, timeout, extra = dispatch(verb, body, project, base, sim)
+    # A project command's platform comes from its spec; a built-in's from the request.
+    platform = extra.pop("_platform", body.get("platform"))
+    name = lock_name(project, sim, platform, body)
     extra["workdir"] = str(base)
     if "log" in extra:
         extra["guest_log"] = to_guest_path(project, extra["log"])
     if "server" in extra:
-        extra["server"].update({"name": lock_name(project, sim), "workdir": str(base),
+        extra["server"].update({"name": name, "workdir": str(base),
                                 "guest_workdir": to_guest_path(project, base)})
     if extra.pop("_exclusive", verb in EXCLUSIVE_BUILTINS) and config.lock_enabled:
-        extra["_lock"] = lock_name(project, sim)
+        extra["_lock"] = name
     return argv, timeout, extra, project
 
 
@@ -721,8 +850,11 @@ def write_sims(project_name, sims):
     tmp.replace(_sims_path(project_name))
 
 
-def lock_name(project, sim=None):
-    """One claim per device: the shared simulator's is the project name."""
+def lock_name(project, sim=None, platform=None, body=None):
+    """One claim per device: the shared simulator's is the project name, an
+    Android emulator's is <project>@android[-<name>] (see android_config)."""
+    if platform == "android":
+        return android_config(project, body)["lock"]
     return f"{project['name']}@{sim['name']}" if sim else project["name"]
 
 
@@ -742,15 +874,19 @@ def resolve_sim(body, project):
     return {"name": name, **entry}
 
 
-def run_host(argv, timeout=120):
+def run_host(argv, timeout=120, binary=False, env=None):
     log(f"RUN {shlex.join(argv)}")
     try:
-        proc = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+        proc = subprocess.run(argv, capture_output=True, text=not binary,
+                              timeout=timeout, env=env)
     except subprocess.TimeoutExpired:
         raise HostFailure(argv, 124, f"timed out after {timeout}s")
     if proc.returncode != 0:
-        raise HostFailure(argv, proc.returncode, (proc.stderr or proc.stdout).strip())
-    return proc.stdout.strip()
+        err = proc.stderr or proc.stdout
+        if binary:
+            err = err.decode(errors="replace")
+        raise HostFailure(argv, proc.returncode, err.strip())
+    return proc.stdout if binary else proc.stdout.strip()
 
 
 def simctl_devices():
@@ -773,6 +909,8 @@ def sim_create(body, project, base):
     cfg = simulators_config(project)
     pname = project["name"]
     name = field(body, "name", SIM_NAME_RE)
+    if name == "android":
+        raise Rejected("'android' names the Android emulator's claim; pick another name")
     limit = int(cfg.get("max", 3))
     port_base = int(cfg.get("port_base", 8090))
 
@@ -1017,21 +1155,8 @@ def status(body, project, base):
     port = sim["port"] if sim else defaults.get("port")
     serving = None
     if port:
-        serving = bool(port_listeners(port))
-        server = read_server(name) if serving else None
-        if server:
-            age = int(time.time() - float(server["at"]))
-            profile = server.get("variant") or "default"
-            lines.append(
-                f"bundler: running on {port}, started by `{server['command']}` "
-                f"(profile {profile}) from "
-                f"{server.get('guest_workdir') or server['workdir']}, "
-                f"{age // 60}m {age % 60}s ago")
-        elif serving:
-            lines.append(f"bundler: something is listening on {port}, not started "
-                         f"through mac-sim, so its build profile is unknown")
-        else:
-            lines.append(f"bundler: nothing listening on {port}")
+        serving, line = describe_bundler(name, port)
+        lines.append(line)
 
     bundle = defaults.get("bundle_id")
     running = None
@@ -1049,8 +1174,300 @@ def status(body, project, base):
     return "\n".join(lines), {"ready": not blockers}
 
 
+def describe_bundler(name, port):
+    """(serving, line): whether something listens on the bundler port, and which
+    build profile it carries when mac-sim started it."""
+    serving = bool(port_listeners(port))
+    server = read_server(name) if serving else None
+    if server:
+        age = int(time.time() - float(server["at"]))
+        profile = server.get("variant") or "default"
+        return serving, (f"bundler: running on {port}, started by `{server['command']}` "
+                         f"(profile {profile}) from "
+                         f"{server.get('guest_workdir') or server['workdir']}, "
+                         f"{age // 60}m {age % 60}s ago")
+    if serving:
+        return serving, (f"bundler: something is listening on {port}, not started "
+                         f"through mac-sim, so its build profile is unknown")
+    return serving, f"bundler: nothing listening on {port}"
+
+
 DIRECT = {"sim_create": sim_create, "sim_delete": sim_delete,
           "sim_list": sim_list, "pull": pull, "status": status}
+
+
+# --------------------------------------------------------------------------
+# Android: the same verbs on the SDK's emulator and adb
+# --------------------------------------------------------------------------
+# Each emulator is named by the `android` block: its AVD, and the console port
+# that fixes its adb serial (emulator-<port>). Fixing the port is what keeps this
+# off an emulator somebody started on the Mac by hand, which takes 5554 by
+# default. Every adb call names that serial, so a second device attached to the
+# Mac is never the one acted on. Each emulator has its own claim: the default
+# one's is <project>@android, another's <project>@android-<name>.
+def android_config(project, body=None):
+    """The shared Android settings merged with the emulator the request names
+    (`android_device`), or the default one."""
+    cfg = project.get("android")
+    if cfg is None:
+        raise Rejected(
+            f"project {project['name']!r} declares no \"android\" block in the host "
+            f"config, so it has no emulator. See docs/MAC-SIM.md.")
+    dname = (body or {}).get("android_device") or cfg["default"]
+    if dname not in cfg["devices"]:
+        raise Rejected(f"project {project['name']!r} declares no android device {dname!r}; "
+                       f"declared: {', '.join(sorted(cfg['devices']))}")
+    lock = f"{project['name']}@android" + ("" if dname == cfg["default"] else f"-{dname}")
+    return {**cfg, **cfg["devices"][dname], "name": dname, "lock": lock}
+
+
+def adb_base(cfg):
+    return [str(cfg["sdk"] / "platform-tools" / "adb"), "-s", cfg["serial"]]
+
+
+def android_env(cfg):
+    """The environment every Android tool expects: Gradle, Expo and Maestro all
+    find the SDK through ANDROID_HOME and a JDK through JAVA_HOME, and none of
+    them is set for a process launched outside a login shell."""
+    env = dict(os.environ)
+    sdk = str(cfg["sdk"])
+    env.update({"ANDROID_HOME": sdk, "ANDROID_SDK_ROOT": sdk})
+    path = [f"{sdk}/platform-tools", f"{sdk}/emulator"]
+    if cfg["java_home"]:
+        env["JAVA_HOME"] = cfg["java_home"]
+        path.append(f"{cfg['java_home']}/bin")
+    env["PATH"] = ":".join(path + [env.get("PATH", "")])
+    return env
+
+
+def adb_state(cfg):
+    """The serial's state as `adb devices` reports it ("device", "offline", ...),
+    or None when no emulator holds that console port."""
+    out = run_host([str(cfg["sdk"] / "platform-tools" / "adb"), "devices"], 30)
+    for line in out.splitlines()[1:]:
+        parts = line.split()
+        if len(parts) >= 2 and parts[0] == cfg["serial"]:
+            return parts[1]
+    return None
+
+
+def android_booted(adb):
+    probe = subprocess.run(adb + ["shell", "getprop", "sys.boot_completed"],
+                           capture_output=True, text=True, timeout=30)
+    return probe.returncode == 0 and probe.stdout.strip() == "1"
+
+
+def android_pid(adb, package):
+    """The app's pid on the emulator, or None when it is not running."""
+    probe = subprocess.run(adb + ["shell", "pidof", "-s", package],
+                           capture_output=True, text=True, timeout=30)
+    pid = probe.stdout.strip()
+    return pid if probe.returncode == 0 and pid.isdigit() else None
+
+
+def require_emulator(cfg):
+    state = adb_state(cfg)
+    if state != "device" or not android_booted(adb_base(cfg)):
+        raise Rejected(
+            f"the emulator {cfg['serial']} ({cfg['avd']}) is "
+            + (f"{state}, not booted" if state else "not running")
+            + ". `mac-sim android boot` starts it.")
+
+
+COMPONENT_RE = re.compile(r"^[A-Za-z0-9._$]{1,128}/[A-Za-z0-9._$]{1,256}$")
+
+
+def launcher_activity(adb, package):
+    """The package's launcher activity as package/class, as the device resolves it."""
+    try:
+        out = run_host(adb + ["shell", "cmd", "package", "resolve-activity", "--brief",
+                              "-c", "android.intent.category.LAUNCHER", package], 30)
+    except HostFailure as exc:
+        raise Rejected(f"cannot resolve the launcher activity of {package}: {exc}")
+    component = out.splitlines()[-1].strip() if out else ""
+    if not COMPONENT_RE.match(component):
+        raise Rejected(f"{package} has no launcher activity on the emulator (is it "
+                       f"installed?); the device answered {out!r}")
+    return component
+
+
+def android_dispatch(verb, body, project, base):
+    """Resolve an Android built-in to (argv, timeout, extra), like dispatch()."""
+    cfg = android_config(project, body)
+    adb = adb_base(cfg)
+    package = field(body, "bundle_id", BUNDLE_RE, required=False, default=cfg["package"])
+
+    if verb == "boot":
+        state = adb_state(cfg)
+        if state == "device" and android_booted(adb):
+            return ["/bin/echo", "already booted"], 10, {}
+        if state is not None:
+            raise Rejected(
+                f"{cfg['serial']} is {state}: an emulator holds that console port but "
+                f"has not finished booting. Wait, or `mac-sim android shutdown` it.")
+        argv = [str(cfg["sdk"] / "emulator" / "emulator"), "-avd", cfg["avd"],
+                "-port", str(cfg["console_port"])] + cfg["emulator_args"]
+        # Detached like a bundler: the emulator must outlive this request, and is
+        # ready once Android itself reports the boot complete.
+        return argv, cfg["boot_timeout"], {
+            "detach": True, "ready_boot": {"adb": adb}, "env": android_env(cfg),
+            "log": str(command_log_path(
+                project, base, "android-emulator",
+                None if cfg["name"] == cfg["default"] else {"name": cfg["name"]}))}
+
+    if verb == "shutdown":
+        require_emulator(cfg)
+        return adb + ["emu", "kill"], 60, {}
+
+    if verb == "install":
+        apk = safe_path(body.get("app"), project, base=base, must_exist=True)
+        if apk.suffix != ".apk":
+            raise Rejected("android install requires an .apk")
+        require_emulator(cfg)
+        return adb + ["install", "-r", str(apk)], 600, {}
+
+    if verb == "uninstall":
+        return adb + ["uninstall", package], 120, {}
+
+    if verb == "terminate":
+        return adb + ["shell", "am", "force-stop", package], 60, {}
+
+    if verb == "launch":
+        locale = field(body, "locale", LOCALE_RE, required=False)
+        # Started by component: an implicit launcher intent does not resolve
+        # through `am start`, which adds the DEFAULT category a launcher activity
+        # does not declare, and `monkey` exits 251 on an emulator with no keys.
+        launch = f"am start -n {launcher_activity(adb, package)}"
+        if locale is None:
+            return adb + ["shell", launch], 60, {}
+        # A per-app locale (Android 13+) reaches only a fresh process, so the app
+        # is stopped first. Both values matched strict patterns above, so this
+        # line has nothing the device shell could read as syntax.
+        tag = locale.replace("_", "-")
+        return adb + ["shell", f"cmd locale set-app-locales {package} --locales {tag} "
+                               f"&& am force-stop {package} && {launch}"], 60, {}
+
+    if verb == "openurl":
+        url = body.get("url")
+        if not isinstance(url, str) or not URL_RE.match(url):
+            raise Rejected("openurl requires a scheme:// URL")
+        # adb joins its arguments into one line for the DEVICE shell, so the URL
+        # is quoted for that shell: an & in a query string must not end the command.
+        return adb + ["shell", "am", "start", "-a", "android.intent.action.VIEW",
+                      "-d", shlex.quote(url), package], 60, {}
+
+    if verb == "appearance":
+        mode = body.get("mode")
+        if mode is None:
+            return adb + ["shell", "cmd", "uimode", "night"], 30, {"_exclusive": False}
+        if mode not in ("light", "dark"):
+            raise Rejected(f"appearance mode must be 'light' or 'dark', got {mode!r}")
+        return adb + ["shell", "cmd", "uimode", "night",
+                      "yes" if mode == "dark" else "no"], 30, {}
+
+    raise Rejected(f"verb {verb!r} is not available for android")
+
+
+def android_list(body, project, base):
+    cfg = android_config(project, body)
+    avds = run_host([str(cfg["sdk"] / "emulator" / "emulator"), "-list-avds"], 60)
+    devices = run_host([str(cfg["sdk"] / "platform-tools" / "adb"), "devices", "-l"], 30)
+    return (f"project emulators: " + ", ".join(
+                f"{n} = {d['avd']} as {d['serial']}" for n, d in cfg["devices"].items())
+            + f"\n"
+            f"AVDs:\n" + "\n".join(f"  {a}" for a in avds.splitlines() if a.strip())
+            + f"\n{devices}"), {}
+
+
+def android_screenshot(body, project, base):
+    cfg = android_config(project, body)
+    out = safe_path(body.get("out"), project, base=base)
+    require_emulator(cfg)
+    png = run_host(adb_base(cfg) + ["exec-out", "screencap", "-p"], 60, binary=True)
+    if not png.startswith(b"\x89PNG"):
+        raise HostFailure(adb_base(cfg) + ["exec-out", "screencap", "-p"], 1,
+                          f"expected a PNG, got {png[:120]!r}")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.unlink(missing_ok=True)
+    # The directory is guest-writable: never write through a planted symlink.
+    with os.fdopen(os.open(out, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                           0o644), "wb") as fh:
+        fh.write(png)
+    return str(out), {"path": str(out)}
+
+
+def android_logs(body, project, base):
+    """A bounded logcat dump: the app's own process by default, like iOS logs.
+    logcat filters by pid, so the app must be running to scope it."""
+    cfg = android_config(project, body)
+    lines = body.get("lines", 200)
+    if not isinstance(lines, int) or not 1 <= lines <= 5000:
+        raise Rejected("lines must be an int in 1..5000")
+    require_emulator(cfg)
+    adb = adb_base(cfg)
+    argv = adb + ["logcat", "-d", "-t", str(lines)]
+    if not body.get("all"):
+        package = field(body, "bundle_id", BUNDLE_RE, required=False,
+                        default=cfg["package"])
+        pid = android_pid(adb, package)
+        if pid is None:
+            raise Rejected(f"{package} is not running on {cfg['serial']}, so its log "
+                           f"cannot be told apart by pid. Launch it, or pass --all.")
+        argv.append(f"--pid={pid}")
+    return run_host(argv, 120), {}
+
+
+def android_status(body, project, base):
+    """`status` for the emulator: the device, the claim, the bundler a debug build
+    needs, and the app. A release build embeds its bundle, so only a debuggable
+    one is not ready without a bundler."""
+    cfg = android_config(project, body)
+    name = cfg["lock"]
+    adb = adb_base(cfg)
+    state = adb_state(cfg)
+    booted = state == "device" and android_booted(adb)
+    lines = [f"emulator: {cfg['avd']} ({cfg['serial']}) "
+             + ("booted" if booted else f"{state}, still booting" if state else "not running")]
+    lines.append("claim: " + describe_owner(name, Handler.config.lock_ttl).split(": ", 1)[1])
+    executing = _executing_info(name)
+    if executing and executing.get("log"):
+        lines.append(f"  log: {executing['log']}")
+
+    installed = debuggable = running = None
+    if booted:
+        dump = subprocess.run(adb + ["shell", "dumpsys", "package", cfg["package"]],
+                              capture_output=True, text=True, timeout=30).stdout
+        installed = f"Package [{cfg['package']}]" in dump
+        flags = next((l for l in dump.splitlines() if "pkgFlags=[" in l), "")
+        debuggable = installed and "DEBUGGABLE" in flags
+        running = installed and android_pid(adb, cfg["package"]) is not None
+
+    serving = None
+    if cfg["port"]:
+        serving, line = describe_bundler(name, cfg["port"])
+        lines.append(line)
+
+    if installed is None:
+        lines.append(f"app: {cfg['package']} unknown (emulator not booted)")
+    elif not installed:
+        lines.append(f"app: {cfg['package']} not installed")
+    else:
+        lines.append(f"app: {cfg['package']} {'running' if running else 'not running'} "
+                     f"({'debug build, loads its bundle from the bundler' if debuggable else 'release build, bundle embedded'})")
+
+    blockers = [reason for failed, reason in (
+        (not booted, "emulator not booted"),
+        (executing is not None, f"{(executing or {}).get('verb')!r} still executing"),
+        (bool(debuggable) and serving is False, "debug build but no bundler"),
+        (installed is False, "app not installed"),
+        (installed and not running, "app not running"),
+    ) if failed]
+    lines.append("ready: " + ("yes" if not blockers else "no (" + ", ".join(blockers) + ")"))
+    return "\n".join(lines), {"ready": not blockers}
+
+
+ANDROID_DIRECT_FNS = {"list": android_list, "screenshot": android_screenshot,
+                      "logs": android_logs, "status": android_status}
 
 
 # --------------------------------------------------------------------------
@@ -1341,8 +1758,17 @@ class Handler(BaseHTTPRequestHandler):
                     "simulators": None if p.get("simulators") is None else {
                         sname: {**entry, "owner": read_owner(f"{name}@{sname}")}
                         for sname, entry in read_sims(name).items()},
+                    "android": None if p.get("android") is None else {
+                        "package": p["android"]["package"],
+                        "default": p["android"]["default"],
+                        "devices": {
+                            dname: {"avd": d["avd"], "serial": d["serial"], "port": d["port"],
+                                    "owner": read_owner(lock), "executing": _executing_info(lock)}
+                            for dname, d in p["android"]["devices"].items()
+                            for lock in [android_config(p, {"android_device": dname})["lock"]]}},
                     "commands": {
                         cname: {
+                            "platform": c.get("platform", "ios"),
                             "variants": sorted(c.get("variants", {})),
                             "params": {k: {kk: vv for kk, vv in v.items() if kk != "pattern"}
                                        for k, v in c.get("params", {}).items()},
@@ -1368,9 +1794,15 @@ class Handler(BaseHTTPRequestHandler):
             if verb not in BUILTIN_VERBS:
                 log(f"REJECT {client}: verb={verb!r}")
                 return self._reply(400, {"error": f"verb must be one of {BUILTIN_VERBS}"})
+            platform = body.get("platform")
+            if platform not in (None, "ios", "android"):
+                raise Rejected(f"unknown platform {platform!r}; expected ios or android")
+            if platform == "android" and verb not in ANDROID_VERBS:
+                raise Rejected(f"{verb!r} is not available for android; available: "
+                               f"{', '.join(sorted(ANDROID_VERBS))}")
             if verb == "lock":
                 return self._lock_verb(body)
-            if verb in DIRECT_VERBS:
+            if verb in (ANDROID_DIRECT if platform == "android" else DIRECT_VERBS):
                 return self._direct(verb, body)
             argv, timeout, extra, project = build_command(verb, body, self.config)
             lock_name = extra.pop("_lock", None)
@@ -1410,7 +1842,12 @@ class Handler(BaseHTTPRequestHandler):
                               bool(body.get("force")), self.config.lock_ttl,
                               guest_workdir=to_guest_path(project, base)).acquire()
             log(f"RUN {verb}: {body.get('name') or body.get('path') or ''}")
-            stdout, extra = DIRECT[verb](body, project, base)
+            if body.get("platform") == "android":
+                if "sim" in body:
+                    raise Rejected("--sim names an iOS simulator; it does not apply to Android")
+                stdout, extra = ANDROID_DIRECT_FNS[verb](body, project, base)
+            else:
+                stdout, extra = DIRECT[verb](body, project, base)
             done = True
             log(f"DONE {verb}: exit=0")
             return self._reply(200, {"verb": verb, "exit_code": 0,
@@ -1445,7 +1882,10 @@ class Handler(BaseHTTPRequestHandler):
         itself -- `reset` stops the tracked subprocess of an in-flight command,
         which is what actually frees the execution lock (see kill_active)."""
         project = self.config.project(body.get("project"))
-        name = lock_name(project, resolve_sim(body, project))
+        if body.get("platform") == "android":
+            name = android_config(project, body)["lock"]
+        else:
+            name = lock_name(project, resolve_sim(body, project))
         action = body.get("action")
         if action in ("release", "reset"):
             killed = kill_active(name, expected_pid=body.get("pid")) if action == "reset" else None
@@ -1471,7 +1911,8 @@ class Handler(BaseHTTPRequestHandler):
                                  "stderr": ""})
 
     def _execute_logged(self, verb, label, argv, timeout, extra, claim, cwd, env,
-                        logfile, detach, ready_url, ready_match, ready_app, server):
+                        logfile, detach, ready_url, ready_match, ready_app, server,
+                        ready_boot=None):
         """Run a project command with its output in a log the guest can follow.
 
         A plain command is done when it exits. A detached one (a bundler, or a
@@ -1482,8 +1923,13 @@ class Handler(BaseHTTPRequestHandler):
         if ready_app:
             # Stop the installed copy first, so "the app is running" below can
             # only mean this command launched it.
-            subprocess.run(["xcrun", "simctl", "terminate", ready_app["udid"],
-                            ready_app["bundle_id"]], capture_output=True, timeout=60)
+            if "adb" in ready_app:
+                subprocess.run(ready_app["adb"] + ["shell", "am", "force-stop",
+                                                   ready_app["package"]],
+                               capture_output=True, timeout=60)
+            else:
+                subprocess.run(["xcrun", "simctl", "terminate", ready_app["udid"],
+                                ready_app["bundle_id"]], capture_output=True, timeout=60)
         try:
             with open_command_log(logfile) as fh:
                 # A new session so a reset or a timeout can kill the whole tree.
@@ -1502,7 +1948,13 @@ class Handler(BaseHTTPRequestHandler):
                                        capture_output=True, text=True)
                 if not probe.stdout or ready_match not in probe.stdout:
                     return False
-            return not ready_app or app_running(ready_app["udid"], ready_app["bundle_id"])
+            if ready_boot and not android_booted(ready_boot["adb"]):
+                return False
+            if not ready_app:
+                return True
+            if "adb" in ready_app:
+                return android_pid(ready_app["adb"], ready_app["package"]) is not None
+            return app_running(ready_app["udid"], ready_app["bundle_id"])
 
         deadline, code, ready = time.time() + timeout, None, False
         while time.time() < deadline:
@@ -1558,6 +2010,7 @@ class Handler(BaseHTTPRequestHandler):
         ready_url = extra.pop("ready_url", None)
         ready_match = extra.pop("ready_match", "")
         ready_app = extra.pop("ready_app", None)
+        ready_boot = extra.pop("ready_boot", None)
         server = extra.pop("server", None)
         logfile = extra.pop("log", None)
         label = body.get("command") or verb
@@ -1566,7 +2019,7 @@ class Handler(BaseHTTPRequestHandler):
         if logfile:
             return self._execute_logged(verb, label, argv, timeout, extra, claim, cwd, env,
                                         logfile, detach, ready_url, ready_match,
-                                        ready_app, server)
+                                        ready_app, server, ready_boot)
 
         try:
             # A new session so a reset can kill the whole tree (os.killpg below),
@@ -1643,6 +2096,11 @@ def main():
     for name, project in config.projects.items():
         log(f"  project {name}: {project['root']} "
             f"[{', '.join(sorted(project['commands'])) or 'no project commands'}]")
+        if project.get("android"):
+            android = project["android"]
+            for dname, device in android["devices"].items():
+                log(f"    android {dname}: {device['avd']} as {device['serial']}"
+                    f"{' (default)' if dname == android['default'] else ''}")
     ThreadingHTTPServer((config.host, config.port), Handler).serve_forever()
 
 

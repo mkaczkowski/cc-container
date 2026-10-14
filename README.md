@@ -453,7 +453,7 @@ the files every setup needs. The rest are opt-in, and you create them yourself.
 | `mcp.env` | yes | Secrets the above references as `${VAR}` (chmod 600, never inline) |
 | `tinyproxy.conf` | yes | Only used where guests have no direct egress |
 | `pi/` | no | Global pi config ([Running pi](#running-pi-beside-claude-code)); mounted only if it exists when a container starts |
-| `mac-sim.json` | no | The opt-in Xcode bridge, from `config/mac-sim.example.json` ([Driving the Mac's Xcode toolchain](#driving-the-macs-xcode-toolchain-from-the-guest)) |
+| `mac-sim.json` | no | The opt-in Xcode (and Android emulator) bridge, from `config/mac-sim.example.json` ([Driving the Mac's Xcode toolchain](#driving-the-macs-xcode-toolchain-from-the-guest)) |
 | `Dockerfile.local` | no | Your own layer on top of the image ([Adding tools](#adding-tools-to-the-image)) |
 
 Nothing else in that directory is read automatically. A directory of your own
@@ -466,7 +466,8 @@ Outside it:
   (`./install.sh --uninstall` removes it).
 - **`~/.local/state/cc-container/`** is written by the wrapper itself: the
   versions `cc-container-build` reuses, the proxy's pid and log, the mac-sim
-  token and log. Nothing to set up.
+  token and log, and the private `TMPDIR`s of mac-sim commands that declare
+  `private_tmp`. Nothing to set up.
 - **The `cc-home` volume** is the container's home directory: both agents'
   logins, pi packages installed with `pix install`, the container's own Claude
   Code settings (such as the [statusline](#statusline)), and trust decisions. It
@@ -621,6 +622,10 @@ guest can only ask for combinations you wrote down. Commands run in **the
 checkout you call from**, git worktrees included, and a checkout claims the
 simulator while it uses it, so two sessions cannot silently overwrite each
 other's build.
+
+The same bridge drives an **Android emulator** on the Mac (`mac-sim android
+boot | install | screenshot | ...`) for a project whose config declares an
+`android` block: the emulator needs a hypervisor the guest does not have.
 
 Read [docs/MAC-SIM.md](docs/MAC-SIM.md) for the config format and
 [SECURITY.md](SECURITY.md) for what this widens: it is a host escape hatch by

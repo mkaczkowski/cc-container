@@ -67,6 +67,24 @@ its own claim, so two worktrees verify at the same time:
   mac-sim --sim mine screenshot
   mac-sim sim list
   mac-sim sim delete mine               # also stops its bundler
+
+A project that declares an "android" block also drives an Android emulator on
+the Mac, under a claim of its own (it never contends with the iOS simulator):
+
+  mac-sim android list                  # AVDs and attached adb devices
+  mac-sim android boot                  # the project's AVD, headless; waits for boot
+  mac-sim android install path/to/app.apk
+  mac-sim android launch [--locale pl]  # terminate | uninstall too
+  mac-sim android screenshot [out.png]
+  mac-sim android openurl myapp://
+  mac-sim android appearance [light|dark]
+  mac-sim android logs --lines 300      # the app's own pid; --all for everything
+  mac-sim android status                # emulator, claim, bundler, app; exit 0 = ready
+  mac-sim android lock | release | reset
+  mac-sim android shutdown
+  mac-sim android run --profile e2e     # any other word is the declared
+                                         # "android-run" project command
+  mac-sim android -d tablet boot        # another emulator the project declares
 """
 
 import argparse
@@ -81,10 +99,18 @@ SHIM = os.environ.get("MAC_SIM_SHIM", "http://192.168.64.1:8890")
 TOKEN = os.environ.get("MAC_SIM_TOKEN", "")
 DEVICE = os.environ.get("MAC_SIM_DEVICE")
 SIM = os.environ.get("MAC_SIM_SIM")
+ANDROID_DEVICE = os.environ.get("MAC_SIM_ANDROID_DEVICE")
 
 BUILTINS = {"list", "booted", "runtimes", "boot", "shutdown", "gui", "install",
             "launch", "terminate", "uninstall", "openurl", "appearance", "screenshot", "logs",
-            "build", "commands", "lock", "release", "reset", "sim", "pull", "status"}
+            "build", "commands", "lock", "release", "reset", "sim", "pull", "status",
+            "android"}
+
+# `mac-sim android <verb>`: built in. Any other word after `android` is the
+# project command `android-<word>`.
+ANDROID_BUILTINS = {"list", "boot", "shutdown", "install", "uninstall", "launch",
+                    "terminate", "screenshot", "openurl", "appearance", "logs",
+                    "status", "lock", "release", "reset"}
 
 # Distinct from a general host-command failure (which exits with the shim's own
 # exit_code, normally the exact status the failing command returned). A 409
@@ -280,6 +306,17 @@ def print_commands(health):
                  f"-- `mac-sim reset` to force-stop it")
             if executing.get("log"):
                 print(f"  live output: {executing['log']}")
+        android = project.get("android")
+        if android:
+            print(f"  android emulators (`mac-sim android [-d NAME] ...`), "
+                  f"package {android['package']}:")
+            for dname, device in sorted(android["devices"].items()):
+                owner = device.get("owner")
+                held = (f", held by {owner.get('guest_workdir') or owner.get('workdir')}"
+                        if owner else "")
+                default = " (default)" if dname == android["default"] else ""
+                print(f"    {dname}{default}: {device['avd']} as {device['serial']}, "
+                      f"bundler port {device.get('port')}{held}")
         sims = project.get("simulators")
         if sims is not None:
             print("  private simulators: " + (", ".join(
@@ -295,11 +332,14 @@ def print_commands(health):
             print("  (no project commands declared)")
         for cname, spec in sorted(project["commands"].items()):
             bits = []
+            if spec.get("platform") == "android":
+                bits.append(f"android: `mac-sim android {cname[len('android-'):]}`"
+                            if cname.startswith("android-") else "android")
             if spec["variants"]:
                 bits.append("variants: " + "|".join(spec["variants"]))
             if spec["params"]:
                 bits.append("args: " + ", ".join(sorted(spec["params"])))
-            print(f"  {cname:<14}{('  ' + '; '.join(bits)) if bits else ''}")
+            print(f"  {cname:<20}{('  ' + '; '.join(bits)) if bits else ''}")
 
 
 def first_positional(argv):
@@ -436,6 +476,106 @@ def scope_of(a):
     return scope
 
 
+def android_main(sub, argv):
+    """`mac-sim android <verb>`: the built-ins, sent with platform "android"."""
+    ap = argparse.ArgumentParser(prog=f"mac-sim android {sub}")
+    ap.add_argument("-d", "--device", default=ANDROID_DEVICE, metavar="NAME",
+                    help="an emulator the project declares (default: its default one)")
+    ap.add_argument("-p", "--project", default=None,
+                    help="project name (only needed if several are configured)")
+    ap.add_argument("-w", "--workdir", default=WORKDIR,
+                    help="checkout to act on (default: the one you are in)")
+    ap.add_argument("-f", "--force", action="store_true",
+                    help="take the emulator over from another checkout")
+    if sub == "install":
+        ap.add_argument("apk")
+    elif sub in ("launch", "terminate", "uninstall"):
+        ap.add_argument("package", nargs="?")
+        if sub == "launch":
+            ap.add_argument("--locale", default=None, metavar="LANG",
+                            help="relaunch the app in this language, e.g. pl or pl-PL "
+                                 "(a per-app locale, Android 13+)")
+    elif sub == "openurl":
+        ap.add_argument("url")
+    elif sub == "appearance":
+        ap.add_argument("mode", nargs="?", choices=["light", "dark"])
+    elif sub == "screenshot":
+        ap.add_argument("out", nargs="?", default=None)
+    elif sub == "logs":
+        ap.add_argument("--lines", type=int, default=200)
+        ap.add_argument("--all", action="store_true",
+                        help="the whole logcat buffer, not only the app's pid")
+    elif sub == "reset":
+        ap.add_argument("--pid", type=int, default=None,
+                        help="only reset if this pid is still the one executing")
+    a = ap.parse_args(argv)
+
+    health = require_feature("android", "`mac-sim android`")
+    scope = {"platform": "android"}
+    if a.device:
+        require_feature("android_devices", "`mac-sim android -d`", health)
+        scope["android_device"] = a.device
+    if a.project:
+        scope["project"] = a.project
+    if a.workdir:
+        scope["workdir"] = guest_abspath(a.workdir)
+    if a.force:
+        scope["force"] = True
+
+    if sub in ("lock", "release", "reset"):
+        payload = {"verb": "lock", **scope}
+        if sub == "reset" or (sub == "release" and a.force):
+            payload["action"] = "reset"
+            if getattr(a, "pid", None):
+                payload["pid"] = a.pid
+        elif sub == "release":
+            payload["action"] = "release"
+        return emit(call(payload, timeout=30))
+
+    if sub == "status":
+        res = emit(call({"verb": "status", **scope}, timeout=120))
+        sys.exit(0 if res.get("ready") else 1)
+
+    if sub == "boot":
+        print("mac-sim android boot: starting the emulator; a cold boot takes a "
+              "minute or two", file=sys.stderr)
+        res = emit(call({"verb": "boot", **scope}), quiet_stdout=True)
+        print("already booted" if "already booted" in res.get("stdout", "") else "booted")
+        if res.get("log"):
+            print(f"emulator output: {res['log']}", file=sys.stderr)
+        return
+
+    if sub == "screenshot":
+        local = guest_abspath(
+            a.out or os.path.join(a.workdir or "/workspace", ".mac-sim/android.png"))
+        res = emit(call({"verb": "screenshot", "out": local, **scope}), quiet_stdout=True)
+        if not os.path.exists(local):
+            sys.exit(f"mac-sim: the host wrote {res.get('path')} but it is not "
+                     f"visible at {local}; is that path inside the bind mount?")
+        print(f"{local} ({os.path.getsize(local)} bytes)")
+        return
+
+    payload = {"verb": sub, **scope}
+    if sub == "install":
+        payload["app"] = guest_abspath(a.apk)
+    elif sub in ("launch", "terminate", "uninstall") and a.package:
+        payload["bundle_id"] = a.package
+    if getattr(a, "locale", None):
+        payload["locale"] = a.locale
+    if sub == "openurl":
+        payload["url"] = a.url
+    if sub == "appearance" and a.mode:
+        payload["mode"] = a.mode
+    if sub == "logs":
+        payload["lines"] = a.lines
+        if a.all:
+            payload["all"] = True
+    res = emit(call(payload))
+    if sub in ("shutdown", "install", "uninstall", "launch", "terminate", "openurl") \
+            or (sub == "appearance" and a.mode):
+        print(f"android {sub}: done")
+
+
 def main():
     def common_options(nested):
         """The options every command takes. A nested parser must not carry
@@ -514,6 +654,19 @@ def main():
     # verbs into this CLI.
     argv = sys.argv[1:]
     first, idx = first_positional(argv)
+    android_prefix = first == "android"
+    if android_prefix:
+        rest = argv[:idx] + argv[idx + 1:]
+        sub, sidx = first_positional(rest)
+        if sub is None or sub in ("-h", "--help"):
+            sys.exit("usage: mac-sim android <" + "|".join(sorted(ANDROID_BUILTINS))
+                     + "|<declared android-* command>> ...")
+        if sub in ANDROID_BUILTINS:
+            return android_main(sub, rest[:sidx] + rest[sidx + 1:])
+        # `android run` is the declared "android-run"; the project command path
+        # below then resolves it like any other (`android metro status` included).
+        argv = rest[:sidx] + [f"android-{sub}"] + rest[sidx + 1:]
+        first, idx = f"android-{sub}", sidx
     if first is not None and first not in BUILTINS:
         # Drop the subcommand by position: dropping every argument equal to it
         # would also eat an option value that happened to match.
@@ -532,8 +685,19 @@ def main():
                    "args": args, **scope_of(a)}
         if a.variant:
             payload["variant"] = a.variant
-        log_path = a.workdir and os.path.join(
-            a.workdir, ".mac-sim", "logs", f"{name}@{a.sim}.log" if a.sim else f"{name}.log")
+        log_stem = f"{name}@{a.sim}" if a.sim else name
+        # After `android`, -d names an emulator, not an iOS simulator.
+        android_device = payload.pop("device", None) if android_prefix else None
+        if android_device == DEVICE:  # MAC_SIM_DEVICE, the iOS default, not a choice
+            android_device = None
+        android_device = android_device or (ANDROID_DEVICE if android_prefix else None)
+        if android_device:
+            require_feature("android_devices", "`mac-sim android -d`", health)
+            payload["android_device"] = android_device
+            for project in health.get("projects", {}).values():
+                if (project.get("android") or {}).get("default") not in (None, android_device):
+                    log_stem = f"{name}@{android_device}"
+        log_path = a.workdir and os.path.join(a.workdir, ".mac-sim", "logs", f"{log_stem}.log")
         # These run for minutes; say which checkout is being built before the
         # wait starts, so a wrong-worktree call is caught then and not after.
         print(f"mac-sim {name}: {a.workdir or 'project root'}", file=sys.stderr)

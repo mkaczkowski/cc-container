@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- `mac-sim android ...` drives an Android emulator on the Mac, for a project
+  that declares an `android` block in `mac-sim.json`: boot, install, launch
+  (`--locale`), screenshot, openurl, appearance, logs, status, shutdown, under
+  a claim of its own (`<project>@android`) so it never contends with the iOS
+  simulator. A project command declared with `"platform": "android"` runs
+  there too, with `{serial}`, `{avd}`, `{package}` and the Android `{port}`,
+  and `mac-sim android <word>` resolves to the command `android-<word>`.
+  New `"private_tmp": true` gives a command its own TMPDIR per variant.
+  Restart the shim (`cc-sim-up`) to pick it up.
 - Session commands (`ccx`, `pix`, `ccxs`, `ccrun`, `pirun`, `ccsh`) run under
   `caffeinate -i`: idle sleep no longer suspends the VM during an unattended
   agent run.
