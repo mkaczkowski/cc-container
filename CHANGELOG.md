@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- `simulators.info_plist`: keys set in a private simulator's copy of the app
+  (re-signed ad hoc), such as `"RCTMetroPort": "{port}"`. Expo SDK 57's debug
+  app rewrites its bundler address from `RCTMetroPort` at every start, so with
+  `global_defaults` alone a private copy loaded from 8081 and showed "No script
+  URL". Add the line from `examples/expo-monorepo.mac-sim.json` to
+  `mac-sim.json`, then restart the shim (`cc-sim-down && cc-sim-up`).
 - `mac-sim sim create` retries the app install while a freshly booted iOS 26
   simulator still refuses it (`IXErrorDomain` "Failed to create promise"),
   which failed most private simulators. Restart the shim (`cc-sim-down &&

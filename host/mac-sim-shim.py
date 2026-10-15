@@ -46,6 +46,7 @@ import signal
 import sqlite3
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -935,6 +936,23 @@ def install_when_ready(udid, app):
             time.sleep(INSTALL_RETRY_DELAY)
 
 
+def patched_app_copy(app, keys, workdir):
+    """A copy of `app` under `workdir` with `keys` set in its Info.plist, ad-hoc
+    re-signed so the edit does not break the seal installd checks. The shared
+    simulator's own bundle is never touched."""
+    copy = Path(workdir) / Path(app).name
+    run_host(["ditto", app, str(copy)], 300)
+    info = copy / "Info.plist"
+    raw = info.read_bytes()
+    fmt = plistlib.FMT_BINARY if raw.startswith(b"bplist") else plistlib.FMT_XML
+    plist = plistlib.loads(raw)
+    plist.update(keys)
+    info.write_bytes(plistlib.dumps(plist, fmt=fmt))
+    run_host(["codesign", "--force", "--sign", "-",
+              "--preserve-metadata=entitlements,flags", str(copy)], 120)
+    return str(copy)
+
+
 def sim_create(body, project, base):
     cfg = simulators_config(project)
     pname = project["name"]
@@ -1007,7 +1025,16 @@ def sim_create(body, project, base):
         run_host(["xcrun", "simctl", "boot", udid], 180)
         run_host(["xcrun", "simctl", "bootstatus", udid, "-b"], 600)
         if app:
-            install_when_ready(udid, app)
+            # Values the app reads from its own bundle, so they hold on every
+            # launch: Expo's debug app rewrites its jsLocation from Info.plist
+            # `RCTMetroPort` at start, which no defaults domain overrides.
+            keys = {key: render(str(template), {"port": port, "sim": name})
+                    for key, template in cfg.get("info_plist", {}).items()}
+            if keys:
+                with tempfile.TemporaryDirectory(prefix="mac-sim-app-") as workdir:
+                    install_when_ready(udid, patched_app_copy(app, keys, workdir))
+            else:
+                install_when_ready(udid, app)
         # The global domain, not the app's: an app-state reset wipes the app's own
         # defaults and would silently send it back to the shared bundler port.
         for key, template in cfg.get("global_defaults", {}).items():
