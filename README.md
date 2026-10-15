@@ -97,7 +97,11 @@ unattended agent run. The Mac sleeps as usual once the session ends. A closed
 lid still sleeps the Mac unless it is on power with an external display.
 
 The session still ends with its terminal. For a run you want to leave and come
-back to, start `pix`/`ccx` inside tmux on the Mac and detach.
+back to, start `pix`/`ccx` inside tmux on the Mac and detach. For a long
+command, the image has tmux too: `ccxs`, then
+`tmux new -s <name> '<command>; exec bash'`, detach with `Ctrl-b d`, and
+`tmux attach -t <name>` from another `ccxs` later. It lives in the shared
+container, so it survives closing the terminal but not `ccdown`.
 
 ### `--dangerously-skip-permissions` is the default
 
@@ -372,8 +376,7 @@ Two smaller notes. New worktrees branch from `origin/HEAD`, so creating one
 fetches; under `CC_PROXY=on` that goes through tinyproxy with a five-second cap
 and falls back to the local `HEAD`. Set `worktree.baseRef` to `"head"` in the
 guest's `~/.claude/settings.json` to branch from your current work and skip the
-fetch. And `claude --help` advertises `--tmux`, which this image cannot satisfy:
-tmux is not installed.
+fetch.
 
 Worktrees also add to the disk figure above, and unlike container state they land
 on **host** disk through the bind mount, so `ccdown` does not reclaim them.
@@ -504,7 +507,8 @@ Outside it:
   `private_tmp`. Nothing to set up.
 - **The `cc-home` volume** is the container's home directory: both agents'
   logins, pi packages installed with `pix install`, the container's own Claude
-  Code settings (such as the [statusline](#statusline)), and trust decisions. It
+  Code settings (such as the [statusline](#statusline)), trust decisions, and
+  the terminfo entries `ccxs` and `ccsh` copy from the Mac (`~/.terminfo`). It
   survives `ccdown` and rebuilds. Deleting it (`container volume delete
   cc-home`) means logging in and redoing those steps.
 

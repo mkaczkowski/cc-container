@@ -440,12 +440,26 @@ _cc_call_hook() {
 # sleeps unless the Mac is on power with an external display.
 _cc_awake() { caffeinate -i "$@"; }
 
+# The Mac's terminfo entry for its TERM, for guest/cc-terminfo-sync to install
+# where the guest lacks one. Empty when the Mac has none either; the guest
+# script then fails only if it needs the entry.
+CC_TERMINFO_ARGS=()
+_cc_terminfo_collect() {
+  CC_TERMINFO_ARGS=()
+  [ -n "${TERM:-}" ] || return 0
+  local src
+  src="$(infocmp -x "${TERM}" 2>/dev/null)" || return 0
+  CC_TERMINFO_ARGS=(--env "CC_TERMINFO_SRC=${src}")
+}
+
 _cc_run() {
   local entrypoint_args=() default_flags=() agent_env=()
   case "$1" in
     --shell)
       shift
-      entrypoint_args=(--entrypoint /opt/cc-tools/shell-entry) ;;
+      _cc_terminfo_collect
+      entrypoint_args=(${CC_TERMINFO_ARGS+"${CC_TERMINFO_ARGS[@]}"}
+                       --entrypoint /opt/cc-tools/shell-entry) ;;
     --pi)
       # pi never asks before a tool call, so it needs no counterpart of
       # --dangerously-skip-permissions: the VM is already its only boundary.
@@ -625,6 +639,9 @@ cc-attach-shell() {
   local tty_args=()
   if [ -t 0 ] && [ -t 1 ]; then tty_args=(-it); fi
   local workdir; workdir="$(_cc_attach_workdir)" || return 1
+  _cc_terminfo_collect
+  container exec --env TERM ${CC_TERMINFO_ARGS+"${CC_TERMINFO_ARGS[@]}"} \
+    "${CC_SESSION_NAME}" /opt/cc-tools/cc-terminfo-sync || return 1
   _cc_awake container exec "${tty_args[@]}" --env TERM --workdir "${workdir}" \
     "${CC_SESSION_NAME}" /bin/bash "$@"
 }

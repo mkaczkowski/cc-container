@@ -1,7 +1,7 @@
 FROM docker.io/library/node:22-bookworm
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      git ripgrep fd-find curl ca-certificates gnupg less jq python3 openssh-client unzip \
+      git ripgrep fd-find curl ca-certificates gnupg less jq python3 openssh-client unzip tmux \
     && rm -rf /var/lib/apt/lists/*
 
 # GitHub CLI: agents reach for `gh` constantly (PRs, issues, CI logs).
