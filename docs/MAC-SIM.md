@@ -174,6 +174,7 @@ block declares:
   "port_base": 8090,
   "clone_app": true,
   "copy_prefs": ["com.apple.launchservices.schemeapproval.plist"],
+  "info_plist": { "RCTMetroPort": "{port}" },
   "global_defaults": { "RCT_jsLocation": "localhost:{port}" }
 }
 ```
@@ -190,9 +191,16 @@ block declares:
 - **`copy_prefs`** are files from the shared device's `Library/Preferences`,
   copied before the first boot. The example carries the approval that stops iOS
   asking "Open in ...?" on every deep link.
+- **`info_plist`** keys are set in the private copy's `Info.plist` (`{port}`
+  and `{sim}` are filled in), which is then ad-hoc re-signed; the shared
+  simulator's app is untouched. The bundle survives an app-state reset, so the
+  value holds on every launch. The example points an Expo debug build at the
+  private bundler: from SDK 57 it rewrites its bundler address from
+  `RCTMetroPort` at every start, so the copy otherwise loads from 8081.
 - **`global_defaults`** are written to the device's global defaults domain. The
-  example points a React Native debug build at the private bundler; the global
-  domain survives an app-state reset, the app's own domain does not.
+  example points a React Native debug build that does not rewrite its address
+  at start at the private bundler; the global domain survives an app-state
+  reset, the app's own domain does not.
 - **`max`** caps how many exist. Each booted simulator costs a few GB of RAM.
 
 `--sim <name>` (or `MAC_SIM_SIM`) then targets it on any command, built-in or
