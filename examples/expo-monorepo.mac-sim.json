@@ -22,13 +22,17 @@
 
       "//s": "Private simulators (`mac-sim sim create <name>`): a copy of the app",
       "//s1": "installed on the shared device, its own Metro port from port_base up,",
-      "//s2": "the deep-link approval so openurl does not prompt, and RCT_jsLocation",
-      "//s3": "in the GLOBAL domain so clearState flows keep loading from that port.",
+      "//s2": "the deep-link approval so openurl does not prompt, and that port set as",
+      "//s3": "RCTMetroPort in the copy's Info.plist, which Expo's debug app turns into",
+      "//s4": "its bundler address at every launch (clearState flows included).",
+      "//s5": "RCT_jsLocation in the GLOBAL domain does the same for an app that does",
+      "//s6": "not rewrite it at start; Expo SDK 57's debug app does, and ignores it.",
       "simulators": {
         "max": 3,
         "port_base": 8090,
         "clone_app": true,
         "copy_prefs": ["com.apple.launchservices.schemeapproval.plist"],
+        "info_plist": { "RCTMetroPort": "{port}" },
         "global_defaults": { "RCT_jsLocation": "localhost:{port}" }
       },
 
@@ -78,6 +82,15 @@
               "env": { "EXPO_PUBLIC_E2E": "true", "EXPO_PUBLIC_DEMO_MODE": "true" }
             }
           }
+        },
+
+        "pods": {
+          "//": "pod install, for after a pnpm install: it deletes files pod install generated into node_modules (expo-sqlite's sqlite3.c/.h) while Pods/ still points at them.",
+          "argv": ["pod", "install"],
+          "cwd": "apps/mobile/ios",
+          "timeout": 1200,
+          "exclusive": false,
+          "path_prepend": ["~/.gem/ruby/4.0.0/bin"]
         },
 
         "metro": {
