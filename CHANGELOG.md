@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Progress while waiting: on a terminal, `mac-sim` shows a status line with
+  the elapsed time once a request has gone three seconds without output
+  (`-q` included), and `ccup`/`ccdown` show a spinner while the runtime, the
+  container start or the stop runs. Captured output is unchanged.
 - `tmux` is in the image, so you can run it from `ccxs`.
   Rebuild the image (`cc-container-build`) and recreate the session
   (`ccdown && ccup`) to get it.

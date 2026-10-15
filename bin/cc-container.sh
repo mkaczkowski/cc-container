@@ -218,10 +218,40 @@ _cc_default_flags() {
 # ---------------------------------------------------------------------------
 _cc_listening() { lsof -iTCP:"$1" -sTCP:LISTEN -n >/dev/null 2>&1; }
 
+# Runs a slow command that prints nothing until it is done under a spinner with
+# the elapsed time, then passes its output on. Only on a terminal: elsewhere it
+# just runs the command. The command runs in a subshell (which also keeps
+# interactive shells from announcing it as a job), so it cannot set variables
+# here.
+_cc_spin() {
+  local label="$1"; shift
+  if [ ! -t 2 ]; then "$@"; return; fi
+  local out err rc
+  out="$(mktemp "${TMPDIR:-/tmp}/cc-spin.XXXXXX")" || return 1
+  err="$(mktemp "${TMPDIR:-/tmp}/cc-spin.XXXXXX")" || { rm -f "${out}"; return 1; }
+  (
+    "$@" >"${out}" 2>"${err}" &
+    pid=$! start=$(date +%s) i=0 spin='|/-\'
+    while kill -0 "${pid}" 2>/dev/null; do
+      printf '\r\033[K%s %s, %ss' "${spin:$((i % 4)):1}" "${label}" "$(($(date +%s) - start))" >&2
+      i=$((i + 1))
+      sleep 0.2
+    done
+    printf '\r\033[K' >&2
+    wait "${pid}"
+  )
+  rc=$?
+  cat "${out}"
+  cat "${err}" >&2
+  rm -f "${out}" "${err}"
+  return "${rc}"
+}
+_cc_quiet() { "$@" >/dev/null 2>&1; }
+
 cc-runtime-up() {
   if container system status >/dev/null 2>&1; then return 0; fi
   echo "cc-container: container runtime not running, starting it..." >&2
-  container system start >/dev/null 2>&1
+  _cc_spin "starting the container runtime" _cc_quiet container system start
   if ! container system status >/dev/null 2>&1; then
     echo "cc-container: failed to start the container runtime; run 'container system start' manually" >&2
     return 1
@@ -535,9 +565,9 @@ cc-up() {
   fi
   if [ -n "${state}" ]; then
     echo "Restarting existing ${CC_SESSION_NAME}..."
-    container start "${CC_SESSION_NAME}" || return 1
+    _cc_spin "restarting ${CC_SESSION_NAME}" container start "${CC_SESSION_NAME}" || return 1
   else
-    container run -d --name "${CC_SESSION_NAME}" \
+    _cc_spin "starting ${CC_SESSION_NAME}" container run -d --name "${CC_SESSION_NAME}" \
       --cpus "${CC_SESSION_CPUS}" \
       --memory "${CC_SESSION_MEMORY}" \
       --volume "${PWD}:${PWD}" \
@@ -707,10 +737,14 @@ _cc_other_containers() {
       2>/dev/null || echo 0
 }
 
-cc-down() {
+_cc_session_remove() {
   container stop "${CC_SESSION_NAME}" 2>/dev/null
   sleep 2
   container delete "${CC_SESSION_NAME}" 2>/dev/null
+}
+
+cc-down() {
+  _cc_spin "stopping ${CC_SESSION_NAME}" _cc_session_remove
   echo "${CC_SESSION_NAME} removed."
   # Leave the host-side helpers up if anything else might still need them: a
   # one-off `ccrun` in another terminal would lose its network otherwise.

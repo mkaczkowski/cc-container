@@ -364,6 +364,13 @@ phase it is in; `-q` prints only the end. From another shell, `mac-sim lock`
 names the log of whatever is executing, and the file can be read directly. Add
 `.mac-sim/` to the project's `.gitignore`.
 
+Whenever any request has waited three seconds with no new output (under `-q`
+too), a status line on stderr shows the time spent and how long the host has
+been silent, for example
+`| mac-sim run: waiting for the host, 4m12s, no new output for 35s`. It is
+drawn only on a terminal, so a script or an agent that captures stderr sees
+exactly what it did before.
+
 `mac-sim status` answers "can I drive the app now?" in one call and exits 0
 only when the answer is yes:
 
