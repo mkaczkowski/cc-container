@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- `mac-sim sim create` retries the app install while a freshly booted iOS 26
+  simulator still refuses it (`IXErrorDomain` "Failed to create promise"),
+  which failed most private simulators. Restart the shim (`cc-sim-down &&
+  cc-sim-up`) to pick it up.
 - Progress while waiting: on a terminal, `mac-sim` shows a status line with
   the elapsed time once a request has gone three seconds without output
   (`-q` included), and `ccup`/`ccdown` show a spinner while the runtime, the

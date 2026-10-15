@@ -181,7 +181,10 @@ block declares:
 - **`clone_app`** installs a copy of `defaults.bundle_id` from the shared
   simulator, so a worktree with no native project still gets a binary. The shared
   simulator must be booted with the app installed. It is the shared build: a
-  native change still has to be built, on either device.
+  native change still has to be built, on either device. A just-booted iOS 26
+  simulator refuses its first install for a few seconds ("Failed to create
+  promise"), so that refusal is retried for up to 25 seconds; any other install
+  error fails the create at once.
 - **`port_base`** is where bundler ports are allocated from, one per simulator.
   Commands reach it as `{port}`; `defaults.port` is the shared simulator's.
 - **`copy_prefs`** are files from the shared device's `Library/Preferences`,
