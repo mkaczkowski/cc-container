@@ -823,6 +823,19 @@ cc-doctor() {
     _p "runtime" "stopped - run: container system start"; ok=1
   fi
 
+  # The VM's disks, the images and every bind-mounted checkout share the Mac's
+  # data volume. When it fills, the guest's root file system goes read-only.
+  local free_gb reclaim
+  free_gb="$(df -Pk "${HOME}" | awk 'NR==2 {printf "%d", $4 / 1048576}')"
+  if [ "${free_gb}" -lt 20 ]; then
+    _p "mac free disk" "LOW ${free_gb} GB - a session's builds and simulators need tens of GB"
+  else
+    _p "mac free disk" "${free_gb} GB"
+  fi
+  reclaim="$(container system df 2>/dev/null | awk '$1 == "Images" {print $6, $7, $8}')"
+  [ -n "${reclaim}" ] \
+    && _p "images reclaimable" "${reclaim} - container image prune -a frees it (pulled or rebuilt when next needed)"
+
   if container image list 2>/dev/null | grep -q "${CC_CONTAINER_IMAGE%%:*}"; then
     _p "image" "${CC_CONTAINER_IMAGE} present"
     local versions

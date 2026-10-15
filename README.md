@@ -841,6 +841,14 @@ with every image and every container's scratch. `ccdown` reclaims the running
 session's share, which is usually the largest single piece. Deleting the base
 image (above) is the next lever.
 
+**Inside a session, `/tmp` and other writes fail with `Read-only file system`
+(`EROFS`).** The Mac's disk filled up: the VM's disk image could not grow, the
+guest saw a write error and remounted its root file system read-only
+(`grep ' / ' /proc/mounts` shows `emergency_ro`). It stays that way after you
+free space. `cc-doctor` shows the free disk and what `container image prune -a`
+would reclaim; free space, then recreate the session with `ccdown && ccup` (your
+home volume is a separate disk and keeps its data).
+
 **A build fails with `read-only file system` or `input/output error`, and keeps
 failing after you free space.** The buildkit helper container wedges when it
 runs out of disk mid-build and does not recover on its own:

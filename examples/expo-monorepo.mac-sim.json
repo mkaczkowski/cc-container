@@ -84,6 +84,15 @@
           }
         },
 
+        "pods": {
+          "//": "pod install, for after a pnpm install: it deletes files pod install generated into node_modules (expo-sqlite's sqlite3.c/.h) while Pods/ still points at them.",
+          "argv": ["pod", "install"],
+          "cwd": "apps/mobile/ios",
+          "timeout": 1200,
+          "exclusive": false,
+          "path_prepend": ["~/.gem/ruby/4.0.0/bin"]
+        },
+
         "metro": {
           "argv": ["pnpm", "--filter", "@myapp/mobile", "exec",
                    "expo", "start", "--port", "{port}"],
