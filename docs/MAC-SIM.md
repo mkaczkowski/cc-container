@@ -38,7 +38,7 @@ mac-sim launch                            # the project's default bundle id
 mac-sim launch --locale pl                # relaunch in that language (pl, pl-PL)
 mac-sim openurl "myapp://"
 mac-sim appearance dark                   # light|dark; no arg prints the current one
-mac-sim screenshot /workspace/.mac-sim/x.png
+mac-sim screenshot .mac-sim/x.png
 mac-sim logs --last 2m --lines 300        # the app's own process only
 mac-sim logs --all | --predicate '...'    # the whole simulator log, or your filter
 mac-sim status                            # device, claim, bundler, app; exit 0 = ready
@@ -86,7 +86,7 @@ fresh process.
 A refused command exits `75` (`EX_TEMPFAIL`), not the shim's normal failure
 exit code, so a script can tell "busy, try again" apart from "actually broken."
 
-Screenshots must be written under `/workspace` so they land in the bind mount
+Screenshots must be written under the project so they land in the bind mount
 and become readable in the container. That is how UI verification works: capture,
 then read the PNG. Add `.mac-sim/` to the project's `.gitignore`.
 
@@ -110,7 +110,7 @@ This works without extra configuration because a guest-created worktree lives at
 `<root>/.claude/worktrees/<name>`, inside the bind mount and therefore inside the
 allowlisted root.
 
-**Write command paths relative, not absolute.** A `"default": "/workspace/.maestro"`
+**Write command paths relative, not absolute.** A `"default": "<root>/.maestro"`
 pins the command to the main checkout; `"default": ".maestro"` follows the caller.
 `{root}` is the calling checkout; `{project_root}` is always the literal root.
 
@@ -369,9 +369,9 @@ only when the answer is yes:
 
 ```
 simulator: iPhone 17 Pro (ACAB998C-...) Booted
-claim: simulator held by /workspace
+claim: simulator held by /Users/you/dev/my-app
   last command: run, 0m 12s ago
-bundler: running on 8081, started by `run` (profile e2e) from /workspace, 0m 14s ago
+bundler: running on 8081, started by `run` (profile e2e) from /Users/you/dev/my-app, 0m 14s ago
 app: com.example.app running
 ready: yes
 ```

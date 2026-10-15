@@ -7,6 +7,7 @@
 # A sync failure is fatal, for the same reason as cc-entry.
 set -e
 [ "${CC_SUBSCRIPTION_ONLY:-0}" = "1" ] && /opt/cc-tools/cc-subscription-guard
+/opt/cc-tools/cc-workspace-link
 /opt/cc-tools/cc-mcp-sync
 /opt/cc-tools/pi-config-sync
 exec pi "$@"

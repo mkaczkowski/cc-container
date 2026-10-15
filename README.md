@@ -63,6 +63,8 @@ own image layer) need files `install.sh` does not create; see
 | `cc-attach` | `ccx` | Attach a Claude Code session (one per terminal) |
 | `pi-attach` | `pix` | Attach a [pi](#running-pi-beside-claude-code) session instead |
 | `cc-attach-shell` | `ccxs` | Bash prompt in the shared container |
+| `cc-worktree` | `ccwt` | From a [herdr](#running-sessions-in-herdr) pane: new worktree, grouped, with `ccx` started in it |
+| `pi-worktree` | `piwt` | The same, with `pix` started in it |
 | `cc-status` | `ccst` | Runtime, proxy, shim, and container state |
 | `cc-down` | `ccdown` | Stop and remove the shared container |
 | `cc-container` | `ccrun` | One-off throwaway session (`--rm`) |
@@ -132,7 +134,9 @@ Claude Code itself starts, measured on an M-series Mac.
 **Caveats.** Sessions share one filesystem and one `~/.claude`: conversations are
 independent, but two agents editing the same file will overwrite each other
 unless you isolate them in worktrees (below). Every session sees the directory
-you ran `ccup` from, not your shell's cwd.
+you ran `ccup` from, mounted at the same path it has on the Mac (`/workspace` is
+a symlink to it). An attach starts in your shell's cwd when that is inside the
+mount, and at its root otherwise.
 State accumulates until `ccdown`, which costs the clean-slate guarantee `--rm`
 gives you — and it is not a small amount: a session left up through a day of
 real work reclaimed 13 GB when torn down. Expect the container runtime's storage
@@ -163,26 +167,18 @@ A subagent declaring `isolation: worktree` is covered the same way. This is what
 removes the file-collision caveat above; the shared `~/.claude` and the shared
 container stay shared.
 
-Workspace trust is keyed on the guest path and every project mounts at
-`/workspace`, so accepting it once covers every project you ever mount, and
-`--worktree` never stops on the trust dialog in a new repo.
+Workspace trust is keyed on the path, and each project mounts at its own host
+path, so trust is asked once per project.
 
-**The host and the guest disagree about the path.** A worktree created in the
-guest records `/workspace/.claude/worktrees/<name>`, which does not exist on the
-Mac: host git lists it as `prunable`, and `git worktree prune` then deletes its
-metadata (the files survive, the git linkage does not). It fails in reverse too,
-so a worktree created on the host is rejected in the guest with
-`Refusing to use <path> as an isolation worktree`. Keep worktree work inside the
-guest. To stop host-side git touching them:
-
-```bash
-git worktree lock .claude/worktrees/<name>
-```
-
-A locked worktree survives both an explicit `git worktree prune` and the expiry
-sweep `git gc` runs, and lists as `locked` instead of `prunable`. The cost is
-that Claude Code's own cleanup and `git worktree remove` will both refuse it
-until you `git worktree unlock` it.
+**The host and the guest agree about the path.** git writes absolute, resolved
+paths into worktree links, so a worktree only works where those paths exist.
+The project is mounted at the same path in the guest as on the Mac, which makes
+a worktree valid on both sides whichever side created it: host git never lists a
+guest-made worktree as `prunable` (so `git worktree prune` and `git gc` leave it
+alone), and a host-made one, such as [`ccwt`](#running-sessions-in-herdr)
+creates, works in the guest. (Under the old `/workspace` mount each side's
+worktrees were broken on the other; a worktree made then can be relinked with
+`git worktree repair <path>` while its metadata still exists.)
 
 A worktree is a fresh checkout, which implies two more things. Add
 `.claude/worktrees/` to the project's `.gitignore`, or every worktree shows up as
@@ -382,6 +378,43 @@ tmux is not installed.
 Worktrees also add to the disk figure above, and unlike container state they land
 on **host** disk through the bind mount, so `ccdown` does not reclaim them.
 
+### Running sessions in herdr
+
+[herdr](https://herdr.dev) is a terminal multiplexer that tracks each agent's
+state (working, blocked, idle) and groups git worktrees under their repo. Two
+things make it work with the container:
+
+**Agent detection.** herdr recognises an agent by the processes in the pane's
+foreground job, and the `claude` process is inside the VM, invisible to it. So
+`ccx`, `ccrun`, `pix` and `pirun` set `HERDR_AGENT=claude` (or `pi`) on the
+host-side launcher, which herdr reads from any process in that job and then
+reads the agent's screen as usual. `herdr agent explain <pane>` shows what it
+matched. Do not run `herdr integration install claude`: it writes a hook into
+the Mac's `~/.claude`, not the guest's, and the guest cannot reach herdr's
+socket anyway. Its only gain is resuming sessions after a herdr restart, which
+`ccx -c` covers by hand.
+
+**Worktree grouping.** From a herdr pane inside the project:
+
+```bash
+ccwt feat-auth                 # .claude/worktrees/feat-auth on worktree-feat-auth, ccx started in it
+ccwt fix-123 --model opus      # extra args go to claude
+piwt feat-auth                 # the same with pix; extra args go to pi
+```
+
+It runs `herdr worktree create` on the Mac (grouped under the repo's workspace),
+then `ccx` (or `pix` for `piwt`) in the new pane, which starts in that worktree. Worktrees made by
+`ccx --worktree` group too: open them with herdr's "Open worktree..." or
+`herdr worktree open --path .claude/worktrees/<name>`. Avoid herdr's own "New
+worktree": it places the checkout under `[worktrees] directory`
+(`~/.herdr/worktrees` by default), outside the mount, where the guest cannot see
+it. The project's `.worktreeinclude` is applied by Claude Code only for its own
+`--worktree`, so a project that needs those files in a `ccwt` or `piwt` worktree should
+copy them in its bootstrap hook.
+
+Grouping adds nothing to memory: it is one herdr server on the Mac and the same
+shared container. Each agent you run still costs what it costs.
+
 ## Running pi beside Claude Code
 
 The image also ships the [pi coding agent](https://pi.dev)
@@ -405,8 +438,8 @@ config in `~/.config/cc-container/pi/` instead (below).
   no counterpart of `--dangerously-skip-permissions`: the VM is its only
   boundary, as it is for Claude Code here.
 - **Project trust is asked once.** pi asks before loading a project's `.pi/`
-  extensions, settings or MCP servers, and saves the answer by path. Every
-  project mounts at `/workspace`, so one decision covers them all, as with
+  extensions, settings or MCP servers, and saves the answer by path. Each
+  project mounts at its own host path, so it asks once per project, as with
   Claude Code's trust dialog.
 - **Logging in.** Run `/login` inside pi. The OAuth callback binds inside the
   container where your browser cannot reach it, so paste the final redirect URL
@@ -434,9 +467,10 @@ config in `~/.config/cc-container/pi/` instead (below).
   `settings.json` (for example `"skills": ["/opt/cc-pi/skills"]`). A new
   directory needs `ccdown && ccup` to be mounted.
 - **Worktrees** are Claude Code's feature; pi has no `--worktree`. Two pi
-  sessions in one checkout share files, so create a worktree in `ccxs` and start
-  pi in it with `pix -C <worktree path relative to the project>` if they need
-  isolation.
+  sessions in one checkout share files, so isolate them with
+  [`piwt`](#running-sessions-in-herdr) from a herdr pane, or create a worktree
+  in `ccxs` and start pi in it with `pix -C <worktree path relative to the
+  project>`.
 - **`mac-sim`** is a plain command on the guest `PATH`, so pi can call it like
   any other tool.
 
@@ -595,8 +629,8 @@ that, so an agent in the guest correctly concludes it cannot build an iOS app an
 stops. The fix is a channel, not an installation: `host/mac-sim-shim.py` runs on
 the Mac and exposes a **fixed allowlist** of verbs over HTTP on the bridge
 address, and `guest/mac-sim` forwards to it. The host does the work; results come
-back through the bind-mounted workspace, so a screenshot written under
-`/workspace` is readable in the container.
+back through the bind-mounted workspace, so a screenshot written under the
+project is readable in the container.
 
 ```bash
 cp config/mac-sim.example.json ~/.config/cc-container/mac-sim.json
@@ -744,8 +778,8 @@ home across projects means one login total.
 
 **It runs as root with `IS_SANDBOX=1`.** apple/container surfaces bind-mounted
 host files as `root:root` with no uid mapping, so a non-root user may not be able
-to write `/workspace`. Files the container creates still land on the host owned
-by you.
+to write the mounted project. Files the container creates still land on the host
+owned by you.
 
 **Config directories are mounted as directories, never as single files.** An
 editor's atomic save replaces the host file's inode; a single-file bind mount
@@ -766,10 +800,9 @@ does not follow that, and the guest stops seeing the file at all — silently.
 - **Only the mounted directory is visible.** Cross-repo work needs an explicit
   extra mount, and a running `ccup` session only picks up a newly added one after
   `ccdown && ccup`.
-- **Git worktrees are guest-only.** They record absolute paths, and the same
-  checkout is `/workspace` in the guest and a `~/...` path on the Mac, so a
-  worktree works on exactly one side of that line. See
-  [Worktrees isolate parallel sessions](#worktrees-isolate-parallel-sessions).
+- **The guest sees your host path layout.** The project mounts at its Mac path
+  (so git worktree links agree on both sides), which means the guest learns your
+  home directory's path. Nothing outside the mount is exposed.
 - **Slower startup.** Each `ccrun` boots a VM (~1.2 s) before Claude Code
   starts. `ccx` against a running session is ~0.1 s.
 - **Some hosts have no guest network egress at all** (endpoint-security packet

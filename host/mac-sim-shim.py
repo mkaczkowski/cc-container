@@ -183,7 +183,10 @@ class Config:
             if not root.exists():
                 raise ValueError(f"project root does not exist: {root}")
             entry["root"] = root
-            entry.setdefault("guest_mount", "/workspace")
+            # cc-container mounts the project at its host path, so by default a
+            # guest path IS the host path. Set guest_mount only for a container
+            # that mounts the project somewhere else.
+            entry.setdefault("guest_mount", str(root))
             entry.setdefault("defaults", {})
             entry.setdefault("commands", {})
             entry.setdefault("pull", {})

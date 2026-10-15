@@ -1,0 +1,34 @@
+#!/bin/sh
+# Points /workspace at the project mount.
+#
+# The project is mounted at its HOST path (CC_HOST_MOUNT), not at /workspace,
+# so every path git records (worktree links above all) means the same file on
+# the Mac and in the guest. git writes resolved real paths into worktree links,
+# so a /workspace mount made guest-created worktrees prunable on the host and
+# host-created ones unusable in the guest.
+#
+# /workspace stays as a symlink for habits and scripts that name it. getcwd()
+# resolves through it, so a process that cd's to /workspace still reports, and
+# records, the host path.
+set -e
+target="${CC_HOST_MOUNT:?cc-workspace-link: CC_HOST_MOUNT is not set; the session was started by an old cc-container.sh. Recreate it with: ccdown && ccup}"
+[ -d "${target}" ] || {
+  echo "cc-workspace-link: CC_HOST_MOUNT=${target} is not a directory in the guest; the project mount is missing" >&2
+  exit 1
+}
+
+if [ -L /workspace ]; then
+  [ "$(readlink /workspace)" = "${target}" ] && exit 0
+  rm /workspace
+elif [ -d /workspace ]; then
+  # The image's WORKDIR leaves an empty directory. Anything else (a mount, or
+  # files) is unexpected, and replacing it would hide that.
+  rmdir /workspace 2>/dev/null || {
+    echo "cc-workspace-link: /workspace is not empty or is a mount point; refusing to replace it with a link to ${target}" >&2
+    exit 1
+  }
+elif [ -e /workspace ]; then
+  echo "cc-workspace-link: /workspace exists and is not a directory or symlink; refusing to replace it" >&2
+  exit 1
+fi
+ln -s "${target}" /workspace

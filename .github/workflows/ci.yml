@@ -11,7 +11,7 @@ jobs:
         run: |
           sudo apt-get update && sudo apt-get install -y zsh shellcheck
           bash -n bin/cc-container.sh install.sh guest/statusline.sh
-          sh -n guest/cc-entry guest/pi-entry
+          sh -n guest/cc-entry guest/pi-entry guest/cc-workspace-link guest/shell-entry
           zsh -n bin/cc-container.sh
           shellcheck -s bash -S warning bin/cc-container.sh install.sh guest/statusline.sh
 

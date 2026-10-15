@@ -115,8 +115,8 @@ location="$(basename "${cwd}")"
 [ -n "${branch}" ] && location="${location}${DIM}:${RST}${branch}"
 parts+=("${location}")
 
-# Inside the container every project is mounted at /workspace, and in a worktree the
-# directory is the worktree's own name, so the path alone never says which repo this is.
+# In a worktree the directory is the worktree's own name, so the basename alone never
+# says which repo this is.
 # After a `ccdown && ccup` somewhere else that is genuinely confusing; the remote settles it.
 project="$(git -C "${cwd}" remote get-url origin 2>/dev/null | sed 's|.*[/:]||; s|\.git$||')"
 if [ -n "${project}" ] && [ "${project}" != "$(basename "${cwd}")" ]; then

@@ -143,7 +143,7 @@ def checkout_root(start=None):
 
     A git worktree's .git is a FILE rather than a directory, which is exactly the
     case this exists for: a session started with `ccx --worktree <name>` lives in
-    /workspace/.claude/worktrees/<name>, and the host must act on that checkout
+    <project>/.claude/worktrees/<name>, and the host must act on that checkout
     rather than on the main one.
     """
     path = os.path.abspath(start or os.getcwd())
@@ -285,8 +285,14 @@ def pretty_devices(raw):
 
 def guest_abspath(raw):
     """Absolutize before sending: the shim resolves paths on the host, so a
-    relative path would resolve against the host's cwd, not the caller's."""
-    return raw if os.path.isabs(raw) else os.path.abspath(raw)
+    relative path would resolve against the host's cwd, not the caller's.
+
+    /workspace is a guest-only symlink to the project's host-path mount (see
+    cc-workspace-link), so it is resolved here; the host has no such path."""
+    path = raw if os.path.isabs(raw) else os.path.abspath(raw)
+    if path == "/workspace" or path.startswith("/workspace/"):
+        path = os.path.realpath("/workspace") + path[len("/workspace"):]
+    return path
 
 
 def print_commands(health):

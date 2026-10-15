@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+- **The project now mounts at its host path, not `/workspace`** (which remains
+  as a symlink to it). git writes resolved absolute paths into worktree links,
+  so under `/workspace` a guest-made worktree was `prunable` on the Mac and a
+  host-made one unusable in the guest; with one path both sides agree. Attach
+  commands start in your cwd when it is inside the mount. Breaking: recreate a
+  running session (`ccdown && ccup`); Claude Code and pi ask for trust once per
+  project, and conversations stored under the old `/workspace` project do not
+  show in `ccx -c` from the new path. `mac-sim`'s `guest_mount` now defaults to
+  the project root: delete a `"guest_mount": "/workspace"` line from
+  `mac-sim.json` and restart the shim (`cc-sim-down && cc-sim-up`).
+- herdr support: `ccx`, `ccrun`, `pix` and `pirun` set `HERDR_AGENT` so herdr
+  detects the agent behind `container exec`, and `cc-worktree` (`ccwt`) creates
+  a worktree as a herdr-grouped workspace and starts `ccx` in it
+  (`pi-worktree`, `piwt`, starts `pix`).
 - `mac-sim android ...` drives Android emulators on the Mac, for a project
   that declares an `android` block in `mac-sim.json` (one emulator, or several
   in `devices`, picked with `-d`): boot, install, launch

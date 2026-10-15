@@ -19,7 +19,6 @@
     {
       "name": "my-app",
       "root": "~/dev/my-app",
-      "guest_mount": "/workspace",
 
       "defaults": {
         "device": "iPhone 17 Pro",

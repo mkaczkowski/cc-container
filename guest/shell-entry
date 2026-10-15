@@ -1,0 +1,6 @@
+#!/bin/sh
+# Entrypoint for one-off container shells (cc-shell): links /workspace to the
+# project mount (see cc-workspace-link), then hands off to bash.
+set -e
+/opt/cc-tools/cc-workspace-link
+exec /bin/bash "$@"

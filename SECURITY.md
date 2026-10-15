@@ -12,7 +12,7 @@ widen it, and you should understand each before using it:
 
 | Setting | What it grants the agent |
 |---|---|
-| `--volume "$PWD:/workspace"` (always) | Full read-write access to the directory you launched from, on the real filesystem. Files it creates land on the host owned by you. |
+| `--volume "$PWD:$PWD"` (always) | Full read-write access to the directory you launched from, on the real filesystem. Files it creates land on the host owned by you. |
 | `CC_EXTRA_VOLUME_ARGS` | The same, for every extra path you list. `:ro` limits it to reading. |
 | `CC_PRE_RUN_HOOK` / `CC_EXTRA_RUN_ARGS` | Whatever host-side helper you wire up yourself (see below). |
 
@@ -66,7 +66,7 @@ shim starts only while you are working inside one of those roots.
 
 The image runs as root with `IS_SANDBOX=1`. apple/container surfaces bind-mounted
 host files as `root:root` with no uid mapping, so a non-root user often cannot
-write `/workspace`. This is contrary to the usual devcontainer convention; the
+write the mounted project. This is contrary to the usual devcontainer convention; the
 justification is that the VM is the sandbox, not the user account inside it.
 
 ## The proxy
