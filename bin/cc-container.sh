@@ -1,7 +1,9 @@
 # cc-container: run Claude Code inside Apple's native `container` runtime.
 #
-# Mounts the current directory at /workspace; the container's home lives in the
-# `cc-home` named volume so login, history, and settings persist across runs.
+# Mounts the current directory at its own host path (so git worktree links mean
+# the same thing on the Mac and in the guest), with /workspace as a symlink to
+# it; the container's home lives in the `cc-home` named volume so login,
+# history, and settings persist across runs.
 #
 # Source this from ~/.zshrc or ~/.bashrc (install.sh does it for you):
 #   source /path/to/cc-container/bin/cc-container.sh
@@ -439,19 +441,21 @@ _cc_call_hook() {
 _cc_awake() { caffeinate -i "$@"; }
 
 _cc_run() {
-  local entrypoint_args=() default_flags=()
+  local entrypoint_args=() default_flags=() agent_env=()
   case "$1" in
     --shell)
       shift
-      entrypoint_args=(--entrypoint /bin/bash) ;;
+      entrypoint_args=(--entrypoint /opt/cc-tools/shell-entry) ;;
     --pi)
       # pi never asks before a tool call, so it needs no counterpart of
       # --dangerously-skip-permissions: the VM is already its only boundary.
       shift
-      entrypoint_args=(--entrypoint /opt/cc-tools/pi-entry) ;;
+      entrypoint_args=(--entrypoint /opt/cc-tools/pi-entry)
+      agent_env=(env HERDR_AGENT=pi) ;;
     *)
       # cc-entry syncs the MCP server list, then execs claude with these args.
       entrypoint_args=(--entrypoint /opt/cc-tools/cc-entry)
+      agent_env=(env HERDR_AGENT=claude)
       local flag; flag="$(_cc_default_flags "$@")"
       [ -n "${flag}" ] && default_flags=("${flag}") ;;
   esac
@@ -464,8 +468,8 @@ _cc_run() {
   # -it needs a real TTY; fall back for piped/scripted use (e.g. claude -p).
   local tty_args=()
   if [ -t 0 ] && [ -t 1 ]; then tty_args=(-it); fi
-  _cc_awake container run --rm "${tty_args[@]}" \
-    --volume "${PWD}:/workspace" \
+  _cc_awake ${agent_env+"${agent_env[@]}"} container run --rm "${tty_args[@]}" \
+    --volume "${PWD}:${PWD}" \
     --volume "cc-home:/root" \
     --volume "${CC_CONTAINER_REPO}/guest:/opt/cc-tools:ro" \
     ${CC_EXTRA_VOLUME_ARGS+"${CC_EXTRA_VOLUME_ARGS[@]}"} \
@@ -474,9 +478,10 @@ _cc_run() {
     ${CC_SIM_RUN_ARGS+"${CC_SIM_RUN_ARGS[@]}"} \
     ${CC_PROXY_ARGS+"${CC_PROXY_ARGS[@]}"} \
     ${CC_POLICY_ARGS+"${CC_POLICY_ARGS[@]}"} \
-    --workdir /workspace \
+    --workdir "${PWD}" \
     --dns 8.8.8.8 \
     --env TERM \
+    --env "CC_HOST_MOUNT=${PWD}" \
     "${entrypoint_args[@]}" \
     "${CC_CONTAINER_IMAGE}" ${default_flags+"${default_flags[@]}"} "$@"
 }
@@ -521,7 +526,7 @@ cc-up() {
     container run -d --name "${CC_SESSION_NAME}" \
       --cpus "${CC_SESSION_CPUS}" \
       --memory "${CC_SESSION_MEMORY}" \
-      --volume "${PWD}:/workspace" \
+      --volume "${PWD}:${PWD}" \
       --volume "cc-home:/root" \
       --volume "${CC_CONTAINER_REPO}/guest:/opt/cc-tools:ro" \
       ${CC_EXTRA_VOLUME_ARGS+"${CC_EXTRA_VOLUME_ARGS[@]}"} \
@@ -530,13 +535,38 @@ cc-up() {
     ${CC_SIM_RUN_ARGS+"${CC_SIM_RUN_ARGS[@]}"} \
       ${CC_PROXY_ARGS+"${CC_PROXY_ARGS[@]}"} \
       ${CC_POLICY_ARGS+"${CC_POLICY_ARGS[@]}"} \
-      --workdir /workspace \
+      --workdir "${PWD}" \
       --dns 8.8.8.8 \
+      --env "CC_HOST_MOUNT=${PWD}" \
       --entrypoint /bin/bash \
-      "${CC_CONTAINER_IMAGE}" -c 'sleep infinity' || return 1
+      "${CC_CONTAINER_IMAGE}" -c '/opt/cc-tools/cc-workspace-link && exec sleep infinity' || return 1
   fi
   _cc_sim_release_probe
   echo "${CC_SESSION_NAME} up, mounting ${PWD}. Attach with: cc-attach"
+}
+
+# The host path the shared session mounts, read from the container itself
+# rather than from $PWD: cc-up may have run in another directory, and the
+# mount is fixed for the container's lifetime.
+_cc_session_mount() {
+  local mount
+  mount="$(container inspect "${CC_SESSION_NAME}" 2>/dev/null \
+    | jq -r '.[0].configuration.initProcess.environment[]? | select(startswith("CC_HOST_MOUNT=")) | sub("^CC_HOST_MOUNT="; "")' 2>/dev/null)"
+  if [ -z "${mount}" ]; then
+    echo "cc-container: ${CC_SESSION_NAME} has no CC_HOST_MOUNT, so it predates the host-path mount (/workspace era). Recreate it with: ccdown && ccup" >&2
+    return 1
+  fi
+  printf '%s\n' "${mount}"
+}
+
+# Where an attach starts: the caller's own directory when it is inside the
+# mount (a worktree pane starts its agent in that worktree), else the mount root.
+_cc_attach_workdir() {
+  local mount; mount="$(_cc_session_mount)" || return 1
+  case "${PWD}/" in
+    "${mount}"/*) printf '%s\n' "${PWD}" ;;
+    *) printf '%s\n' "${mount}" ;;
+  esac
 }
 
 cc-attach() {
@@ -552,9 +582,14 @@ cc-attach() {
   # Re-apply the MCP list on every attach, not just at cc-up: the shared
   # container is long-lived, so this is where an mcp-servers.json edit lands.
   # The mount is fixed at cc-up, so a NEW ${VAR} still needs cc-down && cc-up.
+  local workdir; workdir="$(_cc_attach_workdir)" || return 1
   _cc_attach_guard || return 1
   container exec "${CC_SESSION_NAME}" /opt/cc-tools/cc-mcp-sync || return 1
-  _cc_awake container exec "${tty_args[@]}" --env TERM --workdir /workspace \
+  # HERDR_AGENT tells herdr (if this runs in a herdr pane) that the foreground
+  # job is Claude Code: the claude process itself is inside the VM, invisible
+  # to herdr's host-side process detection.
+  _cc_awake env HERDR_AGENT=claude container exec "${tty_args[@]}" --env TERM \
+    --workdir "${workdir}" \
     "${CC_SESSION_NAME}" claude ${default_flags+"${default_flags[@]}"} "$@"
 }
 
@@ -570,13 +605,15 @@ pi-attach() {
   _cc_attach_guard || return 1
   container exec "${CC_SESSION_NAME}" /opt/cc-tools/cc-mcp-sync || return 1
   container exec "${CC_SESSION_NAME}" /opt/cc-tools/pi-config-sync || return 1
-  # -C <dir> starts pi in a subdirectory of /workspace, e.g. a worktree.
-  local workdir=/workspace
+  # -C <dir> starts pi in a subdirectory of the project root, e.g. a worktree.
+  local workdir; workdir="$(_cc_attach_workdir)" || return 1
   if [ "${1:-}" = "-C" ]; then
-    workdir="/workspace/${2:?pi-attach: -C needs a directory relative to the project root}"
+    local mount; mount="$(_cc_session_mount)" || return 1
+    workdir="${mount}/${2:?pi-attach: -C needs a directory relative to the project root}"
     shift 2
   fi
-  _cc_awake container exec "${tty_args[@]}" --env TERM --workdir "${workdir}" \
+  _cc_awake env HERDR_AGENT=pi container exec "${tty_args[@]}" --env TERM \
+    --workdir "${workdir}" \
     "${CC_SESSION_NAME}" pi "$@"
 }
 
@@ -587,9 +624,60 @@ cc-attach-shell() {
   fi
   local tty_args=()
   if [ -t 0 ] && [ -t 1 ]; then tty_args=(-it); fi
-  _cc_awake container exec "${tty_args[@]}" --env TERM --workdir /workspace \
+  local workdir; workdir="$(_cc_attach_workdir)" || return 1
+  _cc_awake container exec "${tty_args[@]}" --env TERM --workdir "${workdir}" \
     "${CC_SESSION_NAME}" /bin/bash "$@"
 }
+
+# From a herdr pane: create a git worktree under <repo>/.claude/worktrees/<name>
+# (branch worktree-<name>, as `claude --worktree` names it), open it as a herdr
+# workspace grouped under the repo, and run <attach> (ccx or pix) in it. The
+# worktree is created on the Mac; it is valid in the guest because the project
+# is mounted at the same path there. herdr's own "New worktree" places
+# checkouts in [worktrees] directory, outside the mount, where the guest cannot
+# see them.
+# Usage: _cc_worktree <caller> <attach> <name> [agent args...]
+_cc_worktree() {
+  local caller="$1" attach="$2"
+  shift 2
+  if [ -z "${1:-}" ]; then
+    echo "${caller}: usage: ${caller} <name> [agent args...]" >&2
+    return 1
+  fi
+  local name="$1"
+  shift
+  if [ "${HERDR_ENV:-}" != "1" ]; then
+    echo "${caller}: run this from a herdr pane (HERDR_ENV is not 1); it opens the worktree as a herdr workspace" >&2
+    return 1
+  fi
+  if [ "$(_cc_session_state)" != "running" ]; then
+    echo "${caller}: ${CC_SESSION_NAME} is not running. Start it with cc-up." >&2
+    return 1
+  fi
+  local common root mount
+  common="$(git rev-parse --path-format=absolute --git-common-dir)" || return 1
+  root="$(dirname "${common}")"
+  mount="$(_cc_session_mount)" || return 1
+  case "${root}/" in
+    "${mount}"/*) ;;
+    *) echo "${caller}: repo ${root} is outside the session mount ${mount}, so the guest could not see the worktree" >&2
+       return 1 ;;
+  esac
+  local created pane
+  created="$(herdr worktree create --cwd "${root}" --branch "worktree-${name}" \
+    --path "${root}/.claude/worktrees/${name}" --label "${name}" --focus)" || return 1
+  pane="$(printf '%s' "${created}" | jq -r '.result.root_pane.pane_id // empty')"
+  if [ -z "${pane}" ]; then
+    echo "${caller}: herdr worktree create returned no root pane id: ${created}" >&2
+    return 1
+  fi
+  local cmd="${attach}"
+  [ "$#" -gt 0 ] && cmd="${attach} $(printf '%q ' "$@")"
+  herdr pane run "${pane}" "${cmd}"
+}
+
+cc-worktree() { _cc_worktree cc-worktree ccx "$@"; }
+pi-worktree() { _cc_worktree pi-worktree pix "$@"; }
 
 # Running containers other than the shared session and the build helper, i.e.
 # anything that might still need the proxy or the sim shim.
@@ -922,10 +1010,12 @@ pi-container-upgrade() {
 # shells and scripts too (zsh does not expand aliases there).
 ccx()    { cc-attach "$@"; }
 ccxs()   { cc-attach-shell "$@"; }
+ccwt()   { cc-worktree "$@"; }
 ccup()   { cc-up "$@"; }
 ccdown() { cc-down "$@"; }
 ccst()   { cc-status "$@"; }
 ccrun()  { cc-container "$@"; }
 ccsh()   { cc-shell "$@"; }
 pix()    { pi-attach "$@"; }
+piwt()   { pi-worktree "$@"; }
 pirun()  { pi-container "$@"; }
