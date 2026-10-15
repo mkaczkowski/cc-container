@@ -152,7 +152,9 @@ class HostFailure(Exception):
 
     def __init__(self, argv, code, output):
         super().__init__(f"{shlex.join(argv)} failed (exit {code}): {output}")
+        self.argv = argv
         self.code = code
+        self.output = output
 
 
 def log(msg):
@@ -908,6 +910,31 @@ def simulators_config(project):
     return cfg
 
 
+# A freshly booted iOS 26 simulator refuses its first install for several
+# seconds after `bootstatus -b` reports the boot finished ("Failed to set icon
+# resources promise ... Failed to create promise", IXErrorDomain code 2); the
+# same install a few seconds later succeeds. Only that refusal is retried.
+INSTALL_NOT_READY = "Failed to create promise"
+INSTALL_ATTEMPTS = 6
+INSTALL_RETRY_DELAY = 5
+
+
+def install_when_ready(udid, app):
+    for attempt in range(1, INSTALL_ATTEMPTS + 1):
+        try:
+            return run_host(["xcrun", "simctl", "install", udid, app], 300)
+        except HostFailure as exc:
+            if INSTALL_NOT_READY not in exc.output:
+                raise
+            if attempt == INSTALL_ATTEMPTS:
+                raise HostFailure(exc.argv, exc.code,
+                                  f"{exc.output}\n(the simulator still refused the install "
+                                  f"after {INSTALL_ATTEMPTS} attempts {INSTALL_RETRY_DELAY}s apart)")
+            log(f"install on {udid}: simulator not ready to install yet "
+                f"(attempt {attempt}/{INSTALL_ATTEMPTS}), retrying in {INSTALL_RETRY_DELAY}s")
+            time.sleep(INSTALL_RETRY_DELAY)
+
+
 def sim_create(body, project, base):
     cfg = simulators_config(project)
     pname = project["name"]
@@ -980,7 +1007,7 @@ def sim_create(body, project, base):
         run_host(["xcrun", "simctl", "boot", udid], 180)
         run_host(["xcrun", "simctl", "bootstatus", udid, "-b"], 600)
         if app:
-            run_host(["xcrun", "simctl", "install", udid, app], 300)
+            install_when_ready(udid, app)
         # The global domain, not the app's: an app-state reset wipes the app's own
         # defaults and would silently send it back to the shared bundler port.
         for key, template in cfg.get("global_defaults", {}).items():

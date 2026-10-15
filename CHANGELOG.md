@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+- `mac-sim sim create` retries the app install while a freshly booted iOS 26
+  simulator still refuses it (`IXErrorDomain` "Failed to create promise"),
+  which failed most private simulators. Restart the shim (`cc-sim-down &&
+  cc-sim-up`) to pick it up.
+- Progress while waiting: on a terminal, `mac-sim` shows a status line with
+  the elapsed time once a request has gone three seconds without output
+  (`-q` included), and `ccup`/`ccdown` show a spinner while the runtime, the
+  container start or the stop runs. Captured output is unchanged.
+- `tmux` is in the image, so you can run it from `ccxs`.
+  Rebuild the image (`cc-container-build`) and recreate the session
+  (`ccdown && ccup`) to get it.
+- `ccxs` and `ccsh` install the Mac terminal's terminfo entry in the guest when
+  it lacks one, so tmux and less run under a `TERM` Debian does not know, such
+  as Ghostty's `xterm-ghostty`.
 - **The project now mounts at its host path, not `/workspace`** (which remains
   as a symlink to it). git writes resolved absolute paths into worktree links,
   so under `/workspace` a guest-made worktree was `prunable` on the Mac and a

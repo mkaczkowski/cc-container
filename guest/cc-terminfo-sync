@@ -1,0 +1,21 @@
+#!/bin/sh
+# Installs the host terminal's terminfo entry when the guest lacks one.
+#
+# The session inherits the Mac's TERM, and a newer terminal (xterm-ghostty) is
+# not in Debian's terminfo database, so tmux, less and friends refuse to run.
+# The host sends its own entry as CC_TERMINFO_SRC (`infocmp -x`
+# output); it is compiled into ~/.terminfo, which lives in the cc-home volume,
+# so it outlasts the container and is a no-op from then on.
+set -eu
+[ -n "${TERM:-}" ] || exit 0
+infocmp "${TERM}" >/dev/null 2>&1 && exit 0
+if [ -z "${CC_TERMINFO_SRC:-}" ]; then
+  echo "cc-terminfo-sync: the guest has no terminfo entry for TERM=${TERM}, and the Mac has none to send either (infocmp -x ${TERM} fails there). Start the session with a TERM both know, e.g.: TERM=xterm-256color ccxs" >&2
+  exit 1
+fi
+# tic warns on stderr about harmless extensions, so its output is shown only
+# when it fails.
+if ! out="$(printf '%s\n' "${CC_TERMINFO_SRC}" | tic -x -o "${HOME}/.terminfo" - 2>&1)"; then
+  echo "cc-terminfo-sync: tic could not compile the Mac's entry for TERM=${TERM} into ${HOME}/.terminfo: ${out}" >&2
+  exit 1
+fi

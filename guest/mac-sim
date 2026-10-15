@@ -92,6 +92,7 @@ import json
 import os
 import sys
 import threading
+import time
 import urllib.error
 import urllib.request
 
@@ -201,7 +202,7 @@ def request(method, payload=None, timeout=3700):
 
 
 def call(payload, timeout=3700):
-    return request("POST", payload, timeout)
+    return call_following(payload, None, follow=False, timeout=timeout)[0]
 
 
 def log_signature(path):
@@ -212,9 +213,64 @@ def log_signature(path):
     return st.st_ino, st.st_size, st.st_mtime_ns
 
 
-def call_following(payload, log_path, follow):
-    """Send a long-running request and, meanwhile, copy the host's live log of it
-    to stdout. Returns (result, followed).
+# A request still waiting after this many seconds gets a status line, so a
+# quiet host step (an xcodebuild link, a cold emulator boot) does not look hung.
+PROGRESS_AFTER = 3
+SPINNER = "|/-\\"
+
+
+def elapsed(seconds):
+    m, s = divmod(int(seconds), 60)
+    return f"{m}m{s:02d}s" if m else f"{s}s"
+
+
+class Progress:
+    """One self-rewriting status line on stderr while a request waits.
+
+    Drawn only when stderr is a terminal: captured stderr (a script's
+    subprocess call, an agent's Bash tool) gets nothing, so whatever parses it
+    sees what it always did. It is erased before streamed output is written and
+    never drawn over a line that output left unfinished.
+    """
+
+    def __init__(self, label):
+        self.label = label
+        self.enabled = sys.stderr.isatty()
+        self.start = self.last_output = time.monotonic()
+        self.streamed = self.shown = self.line_open = False
+        self.ticks = 0
+
+    def output(self, chunk):
+        self.clear()
+        sys.stdout.buffer.write(chunk)
+        sys.stdout.flush()
+        self.last_output = time.monotonic()
+        self.streamed = True
+        self.line_open = not chunk.endswith(b"\n")
+
+    def draw(self):
+        now = time.monotonic()
+        if not self.enabled or self.line_open or now - self.last_output < PROGRESS_AFTER:
+            return
+        text = f"{SPINNER[self.ticks % len(SPINNER)]} mac-sim {self.label}: waiting for the host, {elapsed(now - self.start)}"
+        if self.streamed:
+            text += f", no new output for {elapsed(now - self.last_output)}"
+        sys.stderr.write("\r\033[K" + text)
+        sys.stderr.flush()
+        self.shown = True
+        self.ticks += 1
+
+    def clear(self):
+        if self.shown:
+            sys.stderr.write("\r\033[K")
+            sys.stderr.flush()
+            self.shown = False
+
+
+def call_following(payload, log_path, follow, timeout=3700):
+    """Send a request and wait for it under a Progress line, meanwhile copying
+    the host's live log of it to stdout when `follow` is set. Returns
+    (result, followed).
 
     The host replaces the log when the command starts, so nothing is printed
     until the file differs from what was there before the request: otherwise
@@ -225,27 +281,36 @@ def call_following(payload, log_path, follow):
 
     def post():
         try:
-            box["result"] = call(payload)
+            box["result"] = request("POST", payload, timeout)
         except SystemExit as exc:
             box["exit"] = exc
 
     thread = threading.Thread(target=post, daemon=True)
     thread.start()
+    progress = Progress(payload.get("command") or payload.get("verb"))
     log = None
-    while True:
-        thread.join(0.5)
-        finished = not thread.is_alive()
-        if follow and log is None and log_signature(log_path) not in (None, before):
-            log = open(log_path, "rb")
+    try:
+        while True:
+            thread.join(0.5)
+            finished = not thread.is_alive()
+            if follow and log is None and log_signature(log_path) not in (None, before):
+                log = open(log_path, "rb")
+            if log:
+                chunk = log.read()
+                if chunk:
+                    progress.output(chunk)
+            if finished:
+                break
+            progress.draw()
+    finally:
+        progress.clear()
+        # The host's last line may lack its newline (pnpm ends on padding),
+        # which would start mac-sim's own verdict partway along it.
+        if progress.line_open:
+            sys.stdout.buffer.write(b"\n")
+            sys.stdout.flush()
         if log:
-            chunk = log.read()
-            if chunk:
-                sys.stdout.buffer.write(chunk)
-                sys.stdout.flush()
-        if finished:
-            break
-    if log:
-        log.close()
+            log.close()
     if "exit" in box:
         raise box["exit"]
     return box["result"], log is not None
