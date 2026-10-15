@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- `cc-doctor` shows the Mac's free disk (LOW under 20 GB) and the image space
+  `container image prune -a` would reclaim. A full Mac disk turns the session's root
+  file system read-only; see Troubleshooting in the README.
+- `examples/expo-monorepo.mac-sim.json` declares a `pods` command (`pod install`),
+  for after a `pnpm install` deletes files `pod install` generated into
+  `node_modules`.
 - `simulators.info_plist`: keys set in a private simulator's copy of the app
   (re-signed ad hoc), such as `"RCTMetroPort": "{port}"`. Expo SDK 57's debug
   app rewrites its bundler address from `RCTMetroPort` at every start, so with
