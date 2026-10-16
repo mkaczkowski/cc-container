@@ -148,7 +148,8 @@ state (verb, pid, elapsed time) precisely so you can tell these two states
 apart before deciding which one to reach for.
 
 Read-only verbs never claim: `list`, `booted`, `runtimes`, `screenshot`, `logs`,
-`pull`, `status`, and `appearance` without an argument.
+`pull`, `status`, and `appearance` without an argument. Neither does `browse`,
+which touches the Mac's browser, not the simulator.
 A project command claims by default; declare `"exclusive": false` for one that
 touches neither the simulator nor a shared port.
 
