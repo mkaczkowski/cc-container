@@ -747,6 +747,12 @@ def main():
         name, rest = resolve_command(commands, first, rest)
         pc, params = command_parser(name, commands.get(name, {}), common)
         a = pc.parse_args(rest)
+        # MAC_SIM_SIM names this checkout's private iOS simulator; an Android
+        # command never runs on it, so only an explicit --sim reaches the shim
+        # (which refuses it).
+        if android_prefix and a.sim == SIM and not any(
+                arg == "--sim" or arg.startswith("--sim=") for arg in rest):
+            a.sim = None
         if a.sim:
             require_feature("sim", "--sim", health)
         args = dict(a.arg)
