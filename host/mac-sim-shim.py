@@ -56,7 +56,7 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from ipaddress import ip_address, ip_network
 from pathlib import Path
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 CONFIG_PATH = os.environ.get(
     "MAC_SIM_CONFIG",
@@ -96,9 +96,13 @@ SCHEME_RE = re.compile(r"^[A-Za-z0-9._ -]{1,128}$")
 DEVICE_RE = re.compile(r"^[A-Za-z0-9._()' -]{1,64}$")
 NAME_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 URL_RE = re.compile(r"^[A-Za-z0-9+.-]{1,32}://[^\s]{0,512}$")
-# What `browse` hands to the Mac's default browser: a web page and nothing else,
-# so it can never launch an app through a custom scheme or open a local file.
-WEB_URL_RE = re.compile(r"^https?://[^\s]{1,2048}$")
+# What `browse` hands to the Mac's default browser: a printable https URL with
+# no credentials or port, under a prefix the host config allows. The browser runs
+# outside the container's network policy and with the user's sign-ins, so an open
+# list would let any guest agent send data anywhere by "opening" a link.
+WEB_URL_RE = re.compile(r"^https://[\x21-\x7e]{1,2048}$")
+DEFAULT_BROWSE_ALLOW = ["https://github.com/", "https://app.notion.com/",
+                        "https://www.notion.so/"]
 LAST_RE = re.compile(r"^\d{1,4}[smh]$")
 SIM_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,31}$")
 LOCALE_RE = re.compile(r"^[A-Za-z]{2,3}([_-][A-Za-z0-9]{2,8}){0,2}$")
@@ -184,6 +188,7 @@ class Config:
         # build-verify-screenshot round in one checkout; short enough that a
         # forgotten session does not block the next day's work.
         self.lock_ttl = int(lock.get("ttl", 4 * 3600))
+        self.browse_allow = parse_browse_allow(raw.get("browse", {}))
         self.projects = {}
         for entry in raw.get("projects", []):
             name = entry.get("name")
@@ -287,6 +292,39 @@ def parse_android(name, raw, defaults):
         "boot_timeout": int(raw.get("boot_timeout", 600)),
         "devices": devices, "default": default,
     }
+
+
+def parse_browse_allow(raw):
+    """The URL prefixes `browse` may open. Each is an https origin followed by a
+    path ending in "/", so a prefix can never match a longer host name
+    (https://github.com.evil.example)."""
+    allow = raw.get("allow", DEFAULT_BROWSE_ALLOW)
+    if not isinstance(allow, list):
+        raise ValueError(f"browse.allow must be a list of URL prefixes, got {allow!r}")
+    for prefix in allow:
+        parts = urlsplit(prefix) if isinstance(prefix, str) else None
+        if (not parts or parts.scheme != "https" or not parts.hostname
+                or parts.username or parts.port or parts.query or parts.fragment
+                or not parts.path.endswith("/")):
+            raise ValueError(f"browse.allow entry must look like https://host/path/, "
+                             f"got {prefix!r}")
+    return allow
+
+
+def browse_url(body, config):
+    if not config.browse_allow:
+        raise Rejected("browse is turned off: browse.allow is [] in the host config")
+    url = body.get("url")
+    if not isinstance(url, str) or not WEB_URL_RE.match(url):
+        raise Rejected(f"browse requires a printable https:// URL, got {url!r}")
+    parts = urlsplit(url)
+    if parts.username or parts.password or parts.port:
+        raise Rejected(f"browse refuses a URL with credentials or a port: {url!r}")
+    if not any(url.startswith(p) and parts.hostname == urlsplit(p).hostname
+               for p in config.browse_allow):
+        raise Rejected(f"browse only opens URLs under {', '.join(config.browse_allow)} "
+                       f"(browse.allow in the host config), got {url!r}")
+    return url
 
 
 def load_config(path):
@@ -734,6 +772,8 @@ def build_command(verb, body, config):
     for the global verbs, otherwise the config entry the lock (if any) belongs
     to -- callers need it to translate a host path back to the guest's own view.
     """
+    if verb == "browse":
+        return ["open", browse_url(body, config)], 30, {}, None
     if verb in GLOBAL_VERBS:
         argv, timeout, extra = dispatch(verb, body, None, None)
         return argv, timeout, extra, None
@@ -771,12 +811,6 @@ def dispatch(verb, body, project, base, sim=None):
         return ["xcrun", "simctl", "list", "runtimes", "--json"], 60, {}
     if verb == "open_simulator_ui":
         return ["open", "-a", "Simulator"], 60, {}
-    if verb == "browse":
-        url = body.get("url")
-        if not isinstance(url, str) or not WEB_URL_RE.match(url):
-            raise Rejected(f"browse requires an http:// or https:// URL, got {url!r}")
-        return ["open", url], 30, {}
-
     if verb == "boot":
         return ["xcrun", "simctl", "boot", resolve_device(body, project)], 180, {}
     if verb == "shutdown":

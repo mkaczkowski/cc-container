@@ -4,7 +4,9 @@
 
 - `mac-sim browse <url>` opens an http(s) page in the Mac's default browser, so
   a tool in the container (e.g. a TUI that opens a PR on click) can show a link
-  without `open` or `xdg-open`. Any other scheme is refused. Needs a restarted shim.
+  without `open` or `xdg-open`. It opens only https URLs under the prefixes in the
+  host config's `browse.allow` (default GitHub and Notion), since that browser is
+  outside the container's network policy. Needs a restarted shim.
 - A project command may declare `settle`: once its log shows a final summary
   and stops growing for `after` seconds while the process stays alive, the shim stops it and
   answers from the summary (Maestro hung after its summary twice on a log-store

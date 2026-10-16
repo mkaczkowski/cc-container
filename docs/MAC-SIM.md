@@ -37,7 +37,7 @@ mac-sim install path/to/App.app
 mac-sim launch                            # the project's default bundle id
 mac-sim launch --locale pl                # relaunch in that language (pl, pl-PL)
 mac-sim openurl "myapp://"
-mac-sim browse https://github.com/o/r/pull/1  # a web page in the Mac's browser (http/https only)
+mac-sim browse https://github.com/o/r/pull/1  # open in the Mac's browser (allowlisted https only)
 mac-sim appearance dark                   # light|dark; no arg prints the current one
 mac-sim screenshot .mac-sim/x.png
 mac-sim logs --last 2m --lines 300        # the app's own process only
@@ -93,6 +93,23 @@ then read the PNG. Add `.mac-sim/` to the project's `.gitignore`.
 
 Relative paths are absolutized guest-side before being sent, and `-d` is accepted
 before or after the subcommand.
+
+### Opening a link in the Mac's browser
+
+`mac-sim browse <url>` runs `open <url>` on the Mac, for a tool in the container
+that shows links (the train dashboard opening a PR or Notion page). That browser
+is outside the container's network policy and carries your sign-ins, so the shim
+opens only https URLs under a prefix the host config allows, with no credentials
+or port in them:
+
+```json
+"browse": { "allow": ["https://github.com/", "https://app.notion.com/"] }
+```
+
+The default (no `browse` block) is GitHub and Notion; `[]` turns the verb off.
+Narrow a prefix to your own account (`https://github.com/<you>/`) to keep a guest
+agent from opening anything else there. Any page under an allowed prefix can
+still be opened, with whatever query string the guest puts in the URL.
 
 ## Worktrees
 

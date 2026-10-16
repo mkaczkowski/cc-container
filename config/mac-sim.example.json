@@ -15,6 +15,10 @@
   "//10": "finishes. Set enabled:false to let any checkout drive it at any time.",
   "lock": { "enabled": true, "ttl": 14400 },
 
+  "//11": "What `mac-sim browse` may open in the Mac's browser: https URL prefixes,",
+  "//12": "each ending in '/'. Omit for GitHub and Notion; [] turns browse off.",
+  "browse": { "allow": ["https://github.com/", "https://app.notion.com/", "https://www.notion.so/"] },
+
   "projects": [
     {
       "name": "my-app",

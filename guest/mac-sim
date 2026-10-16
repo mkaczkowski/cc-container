@@ -23,7 +23,8 @@ Built-in simulator verbs work for any project:
                                          # relative to it); a SQLite database
                                          # arrives as one consistent snapshot
   mac-sim openurl myapp://
-  mac-sim browse https://example.com    # open a web page in the Mac's browser
+  mac-sim browse https://github.com/... # open in the Mac's browser (only the
+                                         # https prefixes the host config allows)
   mac-sim appearance [light|dark]       # set, or print the current one
   mac-sim build                         # xcodebuild the project's workspace
 
@@ -708,7 +709,7 @@ def main():
     sp = sims.add_parser("delete", parents=[nested]); sp.add_argument("name")
     sims.add_parser("list", parents=[nested])
     p = add("openurl"); p.add_argument("url")
-    p = add("browse"); p.add_argument("url", help="an http:// or https:// URL")
+    p = add("browse"); p.add_argument("url", help="an https:// URL under a prefix the host allows")
     p = add("appearance"); p.add_argument("mode", nargs="?", choices=["light", "dark"])
     p = add("screenshot"); p.add_argument("out", nargs="?", default=None)
     p = add("logs")
