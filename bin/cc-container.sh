@@ -34,15 +34,20 @@ mkdir -p "${CC_STATE_DIR}" 2>/dev/null
 CC_CONTAINER_IMAGE="${CC_CONTAINER_IMAGE:-claude-code:local}"
 
 # Host-derived so the defaults suit the machine rather than the author's.
-# Half the cores and half the RAM, floored at 1 cpu / 4 GB.
+# Half the cores (at least 1) and half the RAM, kept between 4 and 8 GB. The VM
+# keeps every guest page it has touched until it stops (guest page cache
+# included), so over a long session the memory cap becomes what the Mac pays,
+# taken from the simulators running beside it.
 _cc_half_cpus() {
   local n; n="$(sysctl -n hw.ncpu 2>/dev/null || echo 4)"
   [ "$((n / 2))" -ge 1 ] && echo "$((n / 2))" || echo 1
 }
-_cc_half_memory_gb() {
+_cc_default_memory_gb() {
   local b g; b="$(sysctl -n hw.memsize 2>/dev/null || echo 8589934592)"
   g="$((b / 1073741824 / 2))"
-  [ "${g}" -ge 4 ] && echo "${g}" || echo 4
+  [ "${g}" -lt 4 ] && g=4
+  [ "${g}" -gt 8 ] && g=8
+  echo "${g}"
 }
 
 # Proxy mode: auto | on | off.
@@ -110,9 +115,12 @@ CC_EXTRA_RUN_ARGS=(${CC_EXTRA_RUN_ARGS+"${CC_EXTRA_RUN_ARGS[@]}"})
 
 # --- user config ------------------------------------------------------------
 [ -r "${CC_CONFIG_DIR}/config.sh" ] && . "${CC_CONFIG_DIR}/config.sh"
+# The shell keeps what config.sh said when this file was sourced; cc-up refuses
+# to create a session from values the file no longer has.
+_CC_CONFIG_LOADED_MTIME="$(stat -f %m "${CC_CONFIG_DIR}/config.sh" 2>/dev/null)"
 
 CC_SESSION_CPUS="${CC_SESSION_CPUS:-$(_cc_half_cpus)}"
-CC_SESSION_MEMORY="${CC_SESSION_MEMORY:-$(_cc_half_memory_gb)g}"
+CC_SESSION_MEMORY="${CC_SESSION_MEMORY:-$(_cc_default_memory_gb)g}"
 CC_PROXY_URL="http://${CC_PROXY_HOST}:${CC_PROXY_PORT}"
 
 CC_MCP_DIR="${CC_MCP_DIR:-${CC_CONFIG_DIR}/mcp}"
@@ -551,17 +559,56 @@ _cc_session_state() {
     | jq -r '.[0].status.state // empty' 2>/dev/null
 }
 
+_cc_config_current() {
+  local now; now="$(stat -f %m "${CC_CONFIG_DIR}/config.sh" 2>/dev/null)"
+  [ "${now}" = "${_CC_CONFIG_LOADED_MTIME}" ] && return 0
+  echo "cc-container: ${CC_CONFIG_DIR}/config.sh changed after this shell loaded it, so this shell still holds the old values (CC_SESSION_MEMORY=${CC_SESSION_MEMORY}, CC_SESSION_CPUS=${CC_SESSION_CPUS}). Open a new terminal and run it there." >&2
+  return 1
+}
+
+_cc_mem_bytes() {
+  case "$1" in
+    *[gG]) echo "$(( ${1%?} * 1073741824 ))" ;;
+    *[mM]) echo "$(( ${1%?} * 1048576 ))" ;;
+    *) echo "cc-container: CC_SESSION_MEMORY=$1 is not <n>g or <n>m" >&2; return 1 ;;
+  esac
+}
+
+# Empty when the existing session has the configured CPUs and memory, else a
+# sentence saying what it has and what config.sh wants.
+_cc_session_size_change() {
+  local have want mem cpus
+  have="$(container inspect "${CC_SESSION_NAME}" \
+    | jq -r '.[0].configuration.resources | "\(.memoryInBytes) \(.cpus)"')" || return 1
+  want="$(_cc_mem_bytes "${CC_SESSION_MEMORY}")" || return 1
+  [ "${have}" = "${want} ${CC_SESSION_CPUS}" ] && return 0
+  read -r mem cpus <<<"${have}"
+  echo "${CC_SESSION_NAME} has $(( mem / 1048576 )) MB and ${cpus} CPUs, config wants $(( want / 1048576 )) MB and ${CC_SESSION_CPUS} CPUs"
+}
+
 cc-up() {
+  _cc_config_current || return 1
   cc-runtime-up || return 1
   _cc_proxy_collect || return 1
   _cc_sim_auto_up || return 1
   _cc_call_hook "${CC_PRE_RUN_HOOK}" CC_PRE_RUN_HOOK || return 1
   _cc_mcp_collect
   _cc_policy_collect || return 1
-  local state; state="$(_cc_session_state)"
+  local state size; state="$(_cc_session_state)"
+  if [ -n "${state}" ]; then
+    size="$(_cc_session_size_change)" || return 1
+  fi
   if [ "${state}" = "running" ]; then
     echo "${CC_SESSION_NAME} already running. Attach with: cc-attach"
+    [ -n "${size}" ] && echo "note: ${size}. ccdown && ccup applies it (it ends attached sessions)."
     return 0
+  fi
+  # Resources are fixed when a container is created, so a restart would bring
+  # the stopped one back at its old size.
+  if [ -n "${size}" ]; then
+    echo "Recreating ${CC_SESSION_NAME}: ${size}."
+    _cc_spin "removing ${CC_SESSION_NAME}" _cc_session_remove || return 1
+    state=""
   fi
   if [ -n "${state}" ]; then
     echo "Restarting existing ${CC_SESSION_NAME}..."

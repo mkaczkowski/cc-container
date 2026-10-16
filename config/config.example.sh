@@ -5,9 +5,11 @@
 # CC_CONTAINER_IMAGE=claude-code:local
 
 # --- resources ---------------------------------------------------------------
-# Default: half the host's cores and half its RAM (min 1 cpu / 4 GB).
+# Default: half the host's cores (min 1) and half its RAM, kept between 4 and
+# 8 GB. The VM holds on to the memory it has used until it stops, so a larger
+# value is memory taken from the Mac and its simulators.
 # CC_SESSION_CPUS=8
-# CC_SESSION_MEMORY=16g
+# CC_SESSION_MEMORY=12g
 
 # --- network -----------------------------------------------------------------
 # auto | on | off. `auto` uses the host proxy only if `cc-doctor` found that

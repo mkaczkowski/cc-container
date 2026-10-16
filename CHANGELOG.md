@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- `ccup` recreates a stopped session whose CPUs or memory differ from the
+  config (a restart kept the old size), notes the difference for a running one,
+  and refuses to run in a shell that loaded `config.sh` before it was edited
+  (that shell would create the session from the old values).
+- The default session memory is half the Mac's RAM capped at 8 GB (it was half
+  with no cap: 18 GB on a 36 GB Mac). The VM does not give memory back to
+  macOS while it runs, so after a long session the Mac pays the full limit,
+  even when `free` in the guest shows most of it free. An explicit
+  `CC_SESSION_MEMORY` is unchanged. Recreate the session (`ccdown`, then
+  `ccup`) to apply.
 - `cc-doctor` shows the Mac's free disk (LOW under 20 GB) and the image space
   `container image prune -a` would reclaim. A full Mac disk turns the session's root
   file system read-only; see Troubleshooting in the README.

@@ -516,11 +516,19 @@ On a new Mac, copy `~/.config/cc-container/` from the old one, run `./install.sh
 (it keeps existing files), `cc-container-build`, and log in again: the
 `cc-home` volume does not move with the config.
 
-Resources default to **half the host's cores and half its RAM** (floor 1 cpu /
-4 GB). Override in `config.sh` or per invocation:
+Resources default to **half the host's cores** (at least 1) and **half its RAM,
+kept between 4 and 8 GB**. The memory limit is what the session ends up costing
+the Mac: the VM keeps every guest page it has touched, page cache included,
+until it stops, whatever `free` reports inside the guest. Raise it only if
+work in the guest gets killed (`cat /sys/fs/cgroup/memory.events` shows
+`oom_kill`). A change applies when the container is recreated: `ccup` recreates a
+stopped session whose size differs from the config, and for a running one says
+what differs (`ccdown`, then `ccup`, applies it). A shell keeps the values
+`config.sh` had when it started, so after editing it `ccup` refuses to run in an
+older shell; open a new terminal. Override in `config.sh` or per invocation:
 
 ```bash
-CC_SESSION_MEMORY=24g CC_SESSION_CPUS=10 ccup
+CC_SESSION_MEMORY=12g CC_SESSION_CPUS=10 ccup
 ```
 
 Only `$PWD` is visible inside the VM. To expose more, add `CC_EXTRA_VOLUME_ARGS`
