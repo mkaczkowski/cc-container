@@ -43,7 +43,9 @@ import plistlib
 import re
 import shlex
 import shutil
+import select
 import signal
+import socket
 import sqlite3
 import subprocess
 import sys
@@ -671,6 +673,19 @@ def project_command(body, project, base, sim=None):
         if android and android["name"] != android["default"]:
             suffix = {"name": android["name"]}
         extra["log"] = str(command_log_path(project, base, name, suffix))
+    if spec.get("settle"):
+        settle = spec["settle"]
+        if not isinstance(settle, dict) or not settle.get("match"):
+            raise Rejected(f"settle of {name!r} needs a \"match\" pattern")
+        try:
+            re.compile(settle["match"], re.M)
+            re.compile(settle.get("fail_match") or "x", re.M)
+            re.compile(settle.get("pass_match") or "x", re.M)
+        except re.error as exc:
+            raise Rejected(f"settle of {name!r}: bad pattern: {exc}")
+        extra["settle"] = {"match": settle["match"], "fail_match": settle.get("fail_match"),
+                           "pass_match": settle.get("pass_match"),
+                           "after": int(settle.get("after", 30))}
     if spec.get("detach"):
         extra["detach"] = True
         extra["ready_url"] = render(spec["ready_url"], values) if spec.get("ready_url") else None
@@ -1991,6 +2006,14 @@ class Handler(BaseHTTPRequestHandler):
                                  "stdout": describe_owner(name, self.config.lock_ttl),
                                  "stderr": ""})
 
+    def _client_gone(self):
+        """Whether the guest closed its connection (a killed `mac-sim` call)."""
+        try:
+            readable, _, _ = select.select([self.connection], [], [], 0)
+            return bool(readable) and self.connection.recv(1, socket.MSG_PEEK) == b""
+        except OSError:
+            return True
+
     def _execute_logged(self, verb, label, argv, timeout, extra, claim, cwd, env,
                         logfile, detach, ready_url, ready_match, ready_app, server,
                         ready_boot=None):
@@ -2001,6 +2024,7 @@ class Handler(BaseHTTPRequestHandler):
         and is then left running; exiting before that is its failure.
         """
         shown = extra.get("guest_log") or logfile
+        settle = extra.pop("settle", None)
         if ready_app:
             # Stop the installed copy first, so "the app is running" below can
             # only mean this command launched it.
@@ -2038,6 +2062,7 @@ class Handler(BaseHTTPRequestHandler):
             return app_running(ready_app["udid"], ready_app["bundle_id"])
 
         deadline, code, ready = time.time() + timeout, None, False
+        settled_at, settled, gone, last_check = None, None, False, 0.0
         while time.time() < deadline:
             code = proc.poll()
             if code is not None:
@@ -2045,7 +2070,45 @@ class Handler(BaseHTTPRequestHandler):
             if detach and is_ready():
                 ready = True
                 break
+            now = time.time()
+            if not detach and now - last_check >= 2:
+                last_check = now
+                # Nobody is waiting for the answer any more (the guest was killed): stop
+                # the command rather than leave it driving the device and holding the claim.
+                # Only for a settling command (a test run): a build may outlive the guest's
+                # 3700 s read timeout (android-build allows 5400 s) and must go on.
+                if settle and self._client_gone():
+                    gone = True
+                    break
+                # A command that printed its final summary and then hung (maestro's
+                # NoSuchFileException in DebugLogStore.finalizeRun) is done.
+                if settle and settled_at is None and re.search(
+                        settle["match"], read_log_tail(logfile), re.M):
+                    settled_at = now
+                if settled_at is not None and now - settled_at >= settle["after"]:
+                    tail = read_log_tail(logfile)
+                    # A pass needs the summary to say so: a crash with no summary is a failure.
+                    failed = bool(settle["fail_match"] and re.search(settle["fail_match"], tail, re.M)) \
+                        or bool(settle["pass_match"] and not re.search(settle["pass_match"], tail, re.M))
+                    settled = 1 if failed else 0
+                    break
             time.sleep(1 if detach else 0.2)
+        if gone or settled is not None:
+            kill_group(proc.pid)
+            proc.wait(timeout=10)
+        if gone:
+            try:
+                keep_numbered_copy(logfile)
+            except OSError as exc:
+                log(f"WARN {label}: could not keep a numbered copy of {logfile}: {exc}")
+            log(f"GONE {label}: the client disconnected; stopped pid {proc.pid}")
+            return
+        if settled is not None:
+            code = settled
+            with open(logfile, "ab") as fh:
+                fh.write(f"\nmac-sim: {label} printed its summary and then hung for "
+                         f"{settle['after']}s; stopped it (exit {code} from the summary)\n".encode())
+            log(f"SETTLED {label}: stopped after its summary, exit={code}")
 
         if ready:
             if server:
