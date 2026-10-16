@@ -36,6 +36,7 @@ Run via `cc-sim-up`. Logs every accepted and rejected call.
 """
 
 import fcntl
+import glob
 import json
 import os
 import plistlib
@@ -461,6 +462,29 @@ def open_command_log(path):
     path.unlink(missing_ok=True)
     return os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
                              0o644), "wb")
+
+
+KEPT_LOGS = 20
+
+
+def keep_numbered_copy(path):
+    """Copy a finished command's log to <stem>-<UTC time>.log beside it, keeping
+    the last KEPT_LOGS per stem. The next run of the command replaces the log
+    itself, so without the copies only the last run's output survives (a full
+    suite claimed across several runs left one run's evidence)."""
+    path = Path(path)
+    if not path.is_file():
+        return
+    stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+    copy = path.with_name(f"{path.stem}-{stamp}.log")
+    copy.unlink(missing_ok=True)
+    with open(path, "rb") as src, os.fdopen(
+            os.open(copy, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644),
+            "wb") as dst:
+        shutil.copyfileobj(src, dst)
+    kept = sorted(path.parent.glob(f"{glob.escape(path.stem)}-2*T*Z.log"))
+    for old in kept[:-KEPT_LOGS]:
+        old.unlink(missing_ok=True)
 
 
 def read_log_tail(path, limit=MAX_LOG_REPLY):
@@ -2035,6 +2059,10 @@ class Handler(BaseHTTPRequestHandler):
             kill_group(proc.pid)
             proc.wait(timeout=10)
         output = read_log_tail(logfile)
+        try:
+            keep_numbered_copy(logfile)
+        except OSError as exc:
+            log(f"WARN {label}: could not keep a numbered copy of {logfile}: {exc}")
         if claim and claim.aborted:
             log(f"RESET {label}: exit={proc.returncode}")
             return self._reply(200, {
