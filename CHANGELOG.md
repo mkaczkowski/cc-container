@@ -3,7 +3,7 @@
 ## Unreleased
 
 - A project command may declare `settle`: once its log shows a final summary
-  and the process stays alive past `after` seconds, the shim stops it and
+  and stops growing for `after` seconds while the process stays alive, the shim stops it and
   answers from the summary (Maestro hung after its summary twice on a log-store
   exception, about 25 minutes). A settling command is also stopped when the
   guest disconnects.
@@ -12,7 +12,6 @@
   survives the next run.
 - `MAC_SIM_SIM` no longer reaches Android commands (it names a private iOS
   simulator, and the shim refused them); an explicit `--sim` is still sent.
-
 - `ccup` recreates a stopped session whose CPUs or memory differ from the
   config (a restart kept the old size), notes the difference for a running one,
   and refuses to run in a shell that loaded `config.sh` before it was edited

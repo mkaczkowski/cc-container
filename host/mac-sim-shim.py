@@ -43,7 +43,7 @@ import plistlib
 import re
 import shlex
 import shutil
-import select
+import stat
 import signal
 import socket
 import sqlite3
@@ -52,6 +52,7 @@ import sys
 import tempfile
 import threading
 import time
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from ipaddress import ip_address, ip_network
 from pathlib import Path
@@ -446,6 +447,13 @@ def app_executable(udid, bundle):
 # --------------------------------------------------------------------------
 # Command logs: live output the guest can follow
 # --------------------------------------------------------------------------
+def settle_after(name, settle):
+    after = settle.get("after", 30)
+    if not isinstance(after, int) or after < 1:
+        raise Rejected(f"settle of {name!r}: \"after\" must be a positive whole number of seconds")
+    return after
+
+
 def command_log_path(project, base, name, sim=None):
     stem = f"{name}@{sim['name']}" if sim else name
     return safe_path(f"{LOG_SUBDIR}/{stem}.log", project, base=base)
@@ -475,15 +483,20 @@ def keep_numbered_copy(path):
     itself, so without the copies only the last run's output survives (a full
     suite claimed across several runs left one run's evidence)."""
     path = Path(path)
-    if not path.is_file():
+    # The directory is guest-writable: never follow a link planted at the log's name.
+    try:
+        src_fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    except FileNotFoundError:
         return
-    stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
-    copy = path.with_name(f"{path.stem}-{stamp}.log")
-    copy.unlink(missing_ok=True)
-    with open(path, "rb") as src, os.fdopen(
-            os.open(copy, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644),
-            "wb") as dst:
-        shutil.copyfileobj(src, dst)
+    with os.fdopen(src_fd, "rb") as src:
+        if not stat.S_ISREG(os.fstat(src_fd).st_mode):
+            return
+        # Microseconds: two runs of one command can finish within a second.
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+        copy = path.with_name(f"{path.stem}-{stamp}.log")
+        with os.fdopen(os.open(copy, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                               0o644), "wb") as dst:
+            shutil.copyfileobj(src, dst)
     kept = sorted(path.parent.glob(f"{glob.escape(path.stem)}-2*T*Z.log"))
     for old in kept[:-KEPT_LOGS]:
         old.unlink(missing_ok=True)
@@ -683,9 +696,11 @@ def project_command(body, project, base, sim=None):
             re.compile(settle.get("pass_match") or "x", re.M)
         except re.error as exc:
             raise Rejected(f"settle of {name!r}: bad pattern: {exc}")
+        if spec.get("detach") or spec.get("exclusive", True) is False:
+            raise Rejected(f"settle of {name!r} needs a logged, non-detached command")
         extra["settle"] = {"match": settle["match"], "fail_match": settle.get("fail_match"),
                            "pass_match": settle.get("pass_match"),
-                           "after": int(settle.get("after", 30))}
+                           "after": settle_after(name, settle)}
     if spec.get("detach"):
         extra["detach"] = True
         extra["ready_url"] = render(spec["ready_url"], values) if spec.get("ready_url") else None
@@ -2007,10 +2022,12 @@ class Handler(BaseHTTPRequestHandler):
                                  "stderr": ""})
 
     def _client_gone(self):
-        """Whether the guest closed its connection (a killed `mac-sim` call)."""
+        """Whether the guest closed its connection (a killed `mac-sim` call). The guest
+        sends nothing after its request body, so a readable EOF is the only answer."""
         try:
-            readable, _, _ = select.select([self.connection], [], [], 0)
-            return bool(readable) and self.connection.recv(1, socket.MSG_PEEK) == b""
+            return self.connection.recv(1, socket.MSG_PEEK | socket.MSG_DONTWAIT) == b""
+        except BlockingIOError:
+            return False
         except OSError:
             return True
 
@@ -2062,7 +2079,7 @@ class Handler(BaseHTTPRequestHandler):
             return app_running(ready_app["udid"], ready_app["bundle_id"])
 
         deadline, code, ready = time.time() + timeout, None, False
-        settled_at, settled, gone, last_check = None, None, False, 0.0
+        settled_at, settled, gone, last_check, last_size = None, None, False, 0.0, -1
         while time.time() < deadline:
             code = proc.poll()
             if code is not None:
@@ -2080,11 +2097,20 @@ class Handler(BaseHTTPRequestHandler):
                 if settle and self._client_gone():
                     gone = True
                     break
-                # A command that printed its final summary and then hung (maestro's
-                # NoSuchFileException in DebugLogStore.finalizeRun) is done.
-                if settle and settled_at is None and re.search(
-                        settle["match"], read_log_tail(logfile), re.M):
-                    settled_at = now
+                # A command that printed its final summary and then went quiet (maestro's
+                # NoSuchFileException in DebugLogStore.finalizeRun) is done. Quiet means the
+                # log stopped growing: a match in a log that still grows is a run in progress.
+                if settle:
+                    try:
+                        size = os.stat(logfile).st_size
+                        if size != last_size:
+                            last_size, settled_at = size, None
+                            if re.search(settle["match"], read_log_tail(logfile), re.M):
+                                settled_at = now
+                    except OSError as exc:
+                        # The guest removed the log: keep supervising, just without settling.
+                        log(f"WARN {label}: cannot read {logfile} to settle: {exc}")
+                        settled_at = None
                 if settled_at is not None and now - settled_at >= settle["after"]:
                     tail = read_log_tail(logfile)
                     # A pass needs the summary to say so: a crash with no summary is a failure.
@@ -2105,9 +2131,14 @@ class Handler(BaseHTTPRequestHandler):
             return
         if settled is not None:
             code = settled
-            with open(logfile, "ab") as fh:
-                fh.write(f"\nmac-sim: {label} printed its summary and then hung for "
-                         f"{settle['after']}s; stopped it (exit {code} from the summary)\n".encode())
+            try:
+                with os.fdopen(os.open(logfile, os.O_WRONLY | os.O_APPEND | os.O_NOFOLLOW),
+                               "ab") as fh:
+                    fh.write(f"\nmac-sim: {label} printed its summary and then stayed quiet for "
+                             f"{settle['after']}s; stopped it (exit {code} from the summary)\n"
+                             .encode())
+            except OSError as exc:
+                log(f"WARN {label}: could not note the settle in {logfile}: {exc}")
             log(f"SETTLED {label}: stopped after its summary, exit={code}")
 
         if ready:

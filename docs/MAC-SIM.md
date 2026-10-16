@@ -355,16 +355,19 @@ A command is an argv template plus its environment:
   silently serves the wrong bundle, and the failure looks like a selector bug
   rather than a wrong-build error.
 - **`settle`** (`{"match", "fail_match", "pass_match", "after"}`) ends a command
-  that printed its final summary and then hung: once its log matches `match` and
-  the process is still alive `after` seconds later (default 30), it is stopped,
-  exiting 1 if the log matches `fail_match` or lacks `pass_match`, else 0. A
-  settling command is also stopped when the guest disconnects (a killed
-  `mac-sim` call), so it does not go on driving the device. Declare it on a test
-  runner (Maestro has hung after its summary on a log-store exception), never on
-  a build, which may outlive the guest's read timeout.
-- Every logged command's finished log is also kept as
-  `<command>[@<target>]-<UTC time>.log` beside it, the last 20 per command: the
-  next run replaces the log itself.
+  that printed its final summary and then went quiet: once its log matches
+  `match` and has not grown for `after` seconds (default 30) while the process is
+  still alive, it is stopped, exiting 1 if the log matches `fail_match` or lacks
+  `pass_match`, else 0. A settling command is also stopped when the guest
+  disconnects (a killed `mac-sim` call), so it does not go on driving the device.
+  Declare it on a logged, non-detached test runner (Maestro has hung after its
+  summary on a log-store exception), never on a build, which may outlive the
+  guest's read timeout. A run with no end marker (Maestro prints none after a
+  passing single flow) never settles and is ended by its `timeout` as before.
+- Every logged command's log is also kept, when the command exits or is
+  stopped, as `<command>[@<target>]-<UTC time>.log` beside it, the last 20 per
+  command: the next run replaces the log itself. A detached command that became
+  ready keeps running and writing, so its log is not copied.
 - **`detach`** runs a server that must outlive the request: it is started in
   its own session and the shim replies once it is ready, leaving it running and
   releasing the claim. Ready means `ready_url` answers with `ready_match`, and,
