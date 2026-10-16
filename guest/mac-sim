@@ -327,14 +327,15 @@ def require_feature(feature, what, health=None):
     return health
 
 
-def emit(result, quiet_stdout=False):
-    """Print a shim result and exit non-zero if the host command failed."""
+def emit(result, quiet_stdout=False, exit_on_failure=True):
+    """Print a shim result and exit non-zero if the host command failed (unless
+    the caller exits itself)."""
     if result.get("stdout") and not quiet_stdout:
         print(result["stdout"])
     if result.get("stderr"):
         print(result["stderr"], file=sys.stderr)
     code = result.get("exit_code", 0)
-    if code != 0:
+    if code != 0 and exit_on_failure:
         sys.exit(f"mac-sim: {result.get('verb')} failed on the host "
                  f"(exit {code}); see output above")
     return result
@@ -788,7 +789,18 @@ def main():
             result["stdout"] = "\n".join(result["stdout"].splitlines()[-40:])
         if result.get("log"):
             print(f"mac-sim {name}: full output in {result['log']}", file=sys.stderr)
-        return emit(result, quiet_stdout=followed and result.get("stdout_is_log", False))
+        emitted = emit(result, quiet_stdout=followed and result.get("stdout_is_log", False),
+                       exit_on_failure=False)
+        # One fixed last line on stdout, success or not: an agent that backgrounds a
+        # build waits for it in the captured output. The followed log can miss the
+        # tool's own closing lines (Gradle's BUILD SUCCESSFUL), and loops waiting
+        # for those ran to their 10-minute timeout.
+        code = result.get("exit_code", 0)
+        print(f"mac-sim {name}: exit={code}", flush=True)
+        if code != 0:
+            sys.exit(f"mac-sim: {result.get('verb')} failed on the host "
+                     f"(exit {code}); see output above")
+        return emitted
 
     a = ap.parse_args()
 

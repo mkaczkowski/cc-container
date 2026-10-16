@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- A project command (`run`, `maestro`, `android build`, ...) now ends with one
+  fixed stdout line, `mac-sim <command>: exit=<code>`, on success and failure.
+  An agent waiting on a backgrounded build matches it; the followed log could
+  miss the tool's own closing lines (Gradle's `BUILD SUCCESSFUL`), and waits on
+  those ran to their 10-minute timeout. Guest-side only, no shim restart.
 - `mac-sim browse <url>` opens an http(s) page in the Mac's default browser, so
   a tool in the container (e.g. a TUI that opens a PR on click) can show a link
   without `open` or `xdg-open`. It opens only https URLs under the prefixes in the
