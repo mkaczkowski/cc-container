@@ -96,6 +96,9 @@ SCHEME_RE = re.compile(r"^[A-Za-z0-9._ -]{1,128}$")
 DEVICE_RE = re.compile(r"^[A-Za-z0-9._()' -]{1,64}$")
 NAME_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 URL_RE = re.compile(r"^[A-Za-z0-9+.-]{1,32}://[^\s]{0,512}$")
+# What `browse` hands to the Mac's default browser: a web page and nothing else,
+# so it can never launch an app through a custom scheme or open a local file.
+WEB_URL_RE = re.compile(r"^https?://[^\s]{1,2048}$")
 LAST_RE = re.compile(r"^\d{1,4}[smh]$")
 SIM_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,31}$")
 LOCALE_RE = re.compile(r"^[A-Za-z]{2,3}([_-][A-Za-z0-9]{2,8}){0,2}$")
@@ -106,7 +109,7 @@ BUILTIN_VERBS = [
     "list", "booted", "runtimes", "boot", "shutdown", "open_simulator_ui",
     "install", "uninstall", "launch", "terminate", "screenshot", "openurl",
     "appearance", "logs", "xcodebuild", "project_command", "lock",
-    "sim_create", "sim_delete", "sim_list", "pull", "status",
+    "sim_create", "sim_delete", "sim_list", "pull", "status", "browse",
 ]
 
 # Verbs made of several host steps; see the "Direct verbs" section.
@@ -116,10 +119,10 @@ DIRECT_VERBS = {"sim_create", "sim_delete", "sim_list", "pull", "status"}
 # simulator" into "act on the shared one". The guest checks this list before
 # sending such a field, so a stale shim is reported instead of obeyed wrongly.
 FEATURES = ["appearance", "locale", "pull", "sim", "progress", "status", "android",
-            "android_devices"]
+            "android_devices", "browse"]
 
 # Verbs that need no project context: they describe the Mac, not a checkout.
-GLOBAL_VERBS = {"list", "booted", "runtimes", "open_simulator_ui"}
+GLOBAL_VERBS = {"list", "booted", "runtimes", "open_simulator_ui", "browse"}
 
 # Verbs that mutate what the simulator is running, so two checkouts doing them
 # concurrently produce nonsense. Read-only observation (screenshot, logs) is
@@ -768,6 +771,11 @@ def dispatch(verb, body, project, base, sim=None):
         return ["xcrun", "simctl", "list", "runtimes", "--json"], 60, {}
     if verb == "open_simulator_ui":
         return ["open", "-a", "Simulator"], 60, {}
+    if verb == "browse":
+        url = body.get("url")
+        if not isinstance(url, str) or not WEB_URL_RE.match(url):
+            raise Rejected(f"browse requires an http:// or https:// URL, got {url!r}")
+        return ["open", url], 30, {}
 
     if verb == "boot":
         return ["xcrun", "simctl", "boot", resolve_device(body, project)], 180, {}

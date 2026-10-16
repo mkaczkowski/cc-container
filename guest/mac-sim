@@ -23,6 +23,7 @@ Built-in simulator verbs work for any project:
                                          # relative to it); a SQLite database
                                          # arrives as one consistent snapshot
   mac-sim openurl myapp://
+  mac-sim browse https://example.com    # open a web page in the Mac's browser
   mac-sim appearance [light|dark]       # set, or print the current one
   mac-sim build                         # xcodebuild the project's workspace
 
@@ -105,7 +106,7 @@ ANDROID_DEVICE = os.environ.get("MAC_SIM_ANDROID_DEVICE")
 BUILTINS = {"list", "booted", "runtimes", "boot", "shutdown", "gui", "install",
             "launch", "terminate", "uninstall", "openurl", "appearance", "screenshot", "logs",
             "build", "commands", "lock", "release", "reset", "sim", "pull", "status",
-            "android"}
+            "android", "browse"}
 
 # `mac-sim android <verb>`: built in. Any other word after `android` is the
 # project command `android-<word>`.
@@ -707,6 +708,7 @@ def main():
     sp = sims.add_parser("delete", parents=[nested]); sp.add_argument("name")
     sims.add_parser("list", parents=[nested])
     p = add("openurl"); p.add_argument("url")
+    p = add("browse"); p.add_argument("url", help="an http:// or https:// URL")
     p = add("appearance"); p.add_argument("mode", nargs="?", choices=["light", "dark"])
     p = add("screenshot"); p.add_argument("out", nargs="?", default=None)
     p = add("logs")
@@ -840,6 +842,12 @@ def main():
 
     if a.cmd == "gui":
         return emit(call({"verb": "open_simulator_ui"}))
+
+    if a.cmd == "browse":
+        require_feature("browse", "browse")
+        emit(call({"verb": "browse", "url": a.url}))
+        print(f"opened {a.url} on the Mac")
+        return
 
     if a.cmd in ("boot", "shutdown"):
         res = call({"verb": a.cmd, **scope})

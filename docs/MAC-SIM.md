@@ -37,6 +37,7 @@ mac-sim install path/to/App.app
 mac-sim launch                            # the project's default bundle id
 mac-sim launch --locale pl                # relaunch in that language (pl, pl-PL)
 mac-sim openurl "myapp://"
+mac-sim browse https://github.com/o/r/pull/1  # a web page in the Mac's browser (http/https only)
 mac-sim appearance dark                   # light|dark; no arg prints the current one
 mac-sim screenshot .mac-sim/x.png
 mac-sim logs --last 2m --lines 300        # the app's own process only
