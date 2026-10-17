@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- The image installs the system libraries and fonts Playwright's Chromium needs
+  (`playwright install-deps chromium`), so `npx playwright install chromium`
+  followed by headless tests works in a session. The browser download stays per
+  project and lands in the `cc-home` volume. Needs `cc-container-build`.
 - A project command (`run`, `maestro`, `android build`, ...) now ends with one
   fixed stdout line, `mac-sim <command>: exit=<code>`, on success and failure.
   An agent waiting on a backgrounded build matches it; the followed log could

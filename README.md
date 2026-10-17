@@ -802,9 +802,12 @@ does not follow that, and the guest stops seeing the file at all — silently.
 - **No Xcode, ever.** It cannot be installed in a Linux guest. Drive the Mac's
   copy instead, through the opt-in bridge described in
   [Driving the Mac's Xcode toolchain from the guest](#driving-the-macs-xcode-toolchain-from-the-guest).
-- **No browser.** The Playwright and Chrome DevTools skills need one. Add
-  `npx playwright install --with-deps chromium` to the Dockerfile for headless
-  runs (large layer).
+- **No browser in the image.** The image has the system libraries Playwright's
+  Chromium needs, but not the browser: run `npx playwright install chromium` in
+  the project (once per Playwright version, kept in the `cc-home` volume). Runs
+  are headless only. Google Chrome has no Linux arm64 build, so point the
+  Playwright MCP server at Chromium (`--browser chromium`), not its default
+  `chrome` channel.
 - **No enterprise policy or telemetry.** The host's managed-settings file is not
   mounted. To opt in, bind-mount it read-only at
   `/etc/claude-code/managed-settings.json` — never `COPY` it into the image, as
