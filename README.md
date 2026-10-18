@@ -585,6 +585,15 @@ older shell; open a new terminal. Override in `config.sh` or per invocation:
 CC_SESSION_MEMORY=12g CC_SESSION_CPUS=10 ccup
 ```
 
+**Free disk.** The VM disks, the home volumes, the images and every mounted
+checkout share the Mac's data volume. When it fills, a running guest's disk
+write fails, its kernel remounts `/` read-only, and only recreating the
+container (`ccdown && ccup`) brings it back. So `ccup`, `ccrun`, the profile
+`up` and `run`, and `cc-container-build` refuse to start with less than
+`CC_DISK_MIN_GB` (10) free, and every command warns below `CC_DISK_WARN_GB`
+(25). `container system df` shows what takes the space. `CC_DISK_MIN_GB=0 ccup`
+skips the refusal once.
+
 Only `$PWD` is visible inside the VM. To expose more, add `CC_EXTRA_VOLUME_ARGS`
 entries in `config.sh` — one `--volume` each, `:ro` unless the agent must write
 back. Mounting a host path at the *same absolute path* it has on the Mac makes

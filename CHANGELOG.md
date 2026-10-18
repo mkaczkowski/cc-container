@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- **Free-disk guard.** `ccup`, `ccrun`, `pirun`, `ccsh`, a profile's `up` and
+  `run`, and `cc-container-build` refuse to start with less than
+  `CC_DISK_MIN_GB` (default 10) free on the Mac, naming `container system df`
+  and `container image prune -a`. Attaching (`ccx`, `pix`, `ccxs`, `cc-exec`)
+  and every guarded command warn below `CC_DISK_WARN_GB` (default 25).
+  `cc-doctor` uses the same thresholds. A full Mac disk had remounted a running
+  session's root file system read-only (journal I/O errors), which only
+  `ccdown && ccup` repairs. `CC_DISK_MIN_GB=0` turns the refusal off.
 - **Profiles**: `cc-profile <name> <verb>` runs a second container beside the
   shared session, configured by `~/.config/cc-container/profiles/<name>.sh`
   (sourced after `config.sh`; start from `config/profile.example.sh`). Verbs:

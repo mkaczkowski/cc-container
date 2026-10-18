@@ -11,6 +11,13 @@
 # CC_SESSION_CPUS=8
 # CC_SESSION_MEMORY=12g
 
+# --- disk --------------------------------------------------------------------
+# Free GB on the Mac below which starting a container or a build is refused,
+# and below which every command warns. A full disk turns running guests' root
+# file systems read-only. CC_DISK_MIN_GB=0 turns the refusal off.
+# CC_DISK_MIN_GB=10
+# CC_DISK_WARN_GB=25
+
 # --- network -----------------------------------------------------------------
 # auto | on | off. `auto` uses the host proxy only if `cc-doctor` found that
 # guests have no direct egress. Set `off` to skip the check entirely.
