@@ -19,6 +19,23 @@ widen it, and you should understand each before using it:
 The first is the point of the tool. The second is opt-in per path. The third is
 entirely yours, and deserves real thought.
 
+## Profiles
+
+A profile (`cc-profile`) is a second VM with its own settings file, and it
+inherits `config.sh`. **It narrows the boundary only for what it explicitly
+resets**: a profile that does not reset `CC_EXTRA_VOLUME_ARGS` still mounts
+every extra path, and one that leaves `CC_MCP=1` still receives the `mcp.env`
+secrets. `config/profile.example.sh` resets all of them; check a running one
+with `container inspect <name>` (mounts and `initProcess.environment`).
+
+A profile that adds Linux capabilities (`CC_EXTRA_RUN_ARGS=( --cap-add ... )`,
+for example `CAP_SYS_ADMIN` so a sandbox such as `bwrap` can create namespaces
+inside it) gives root in that guest more power over that guest's kernel. Each
+container is its own VM, so this does not reach the Mac or the other
+containers; it does mean the VM boundary is the only one left around that
+container's root, as it already is for the session.
+
+
 ## If you bridge a host-only tool
 
 Some toolchains cannot exist in a Linux guest — Xcode is the obvious one. Guest →

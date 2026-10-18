@@ -66,6 +66,8 @@ own image layer) need files `install.sh` does not create; see
 | `cc-worktree` | `ccwt` | From a [herdr](#running-sessions-in-herdr) pane: new worktree, grouped, with `ccx` started in it |
 | `pi-worktree` | `piwt` | The same, with `pix` started in it |
 | `cc-status` | `ccst` | Runtime, proxy, shim, and container state |
+| `cc-exec` | | Run one command (argv, not a shell string) in the shared container, from a script |
+| `cc-profile` | | Run a verb against a [profile](#profiles-a-second-isolated-container): `cc-profile <name> up` |
 | `cc-down` | `ccdown` | Stop and remove the shared container |
 | `cc-container` | `ccrun` | One-off throwaway session (`--rm`) |
 | `pi-container` | `pirun` | One-off throwaway pi session (`--rm`) |
@@ -477,6 +479,55 @@ config in `~/.config/cc-container/pi/` instead (below).
 - **`mac-sim`** is a plain command on the guest `PATH`, so pi can call it like
   any other tool.
 
+## Profiles: a second, isolated container
+
+The shared session carries everything `config.sh` gives it: your extra mounts,
+the MCP servers and their `mcp.env` secrets, the pi config, the mac-sim token,
+and the `cc-home` login. A long-lived job that should see none of that (a
+benchmark runner, a nightly build) gets a **profile**: a second container,
+beside the session, with its own name, home volume, image, mounts and size.
+
+```bash
+mkdir -p ~/.config/cc-container/profiles
+cp config/profile.example.sh ~/.config/cc-container/profiles/worker.sh
+cc-profile worker up              # from the project directory
+cc-profile worker exec make test  # argv, from a script or a terminal
+cc-profile worker shell           # bash in it
+cc-profile worker status
+cc-profile worker down            # the shared session keeps running
+```
+
+Verbs: `up`, `down`, `status`, `attach`, `pi`, `shell`, `exec`, `run` (one-off,
+`--rm`), `build`, `upgrade`, `doctor`. Give a profile you use often a short name
+in `config.sh`: `ccworker() { cc-profile worker "$@"; }`.
+
+How it works:
+
+- `~/.config/cc-container/profiles/<name>.sh` is sourced **after** `config.sh`,
+  so a profile inherits everything and overrides what it names. Arrays such as
+  `CC_EXTRA_VOLUME_ARGS` and `CC_EXTRA_RUN_ARGS` must be reset there if the
+  profile should not inherit them; the example resets both.
+- `cc-profile` sources the library again in a fresh shell with
+  `CC_PROFILE=<name>`, so the profile's values never reach your shell.
+- **Give it its own home volume** (`CC_HOME_VOLUME`): only one running container
+  can hold a named volume, so a profile on `cc-home` cannot start beside the
+  session. A new volume is created on first use (sparse, 512 GB by default; make
+  it explicitly with `container volume create -s <size> <name>` for another
+  size). It needs its own login (`cc-profile <name> attach`, then `/login`, or
+  a `claude setup-token` token you pass in).
+- `CC_MCP=0`, `CC_PI_SYNC=0` and `CC_SIM_AUTO=0` keep the MCP servers and their
+  secrets, the pi config and the mac-sim token out of it.
+- **Its own image**, if it needs other tools: set `CC_CONTAINER_IMAGE` to a
+  different image *name* (`claude-code-worker:local`, not `claude-code:worker`,
+  so the two builds never share a `:base` tag) and `CC_IMAGE_OVERLAY` to its
+  Dockerfile. `cc-profile <name> build|upgrade` pins its agent versions in
+  their own record, so upgrading the session's image never changes it.
+- The proxy, the mac-sim shim and the hooks are host-wide. `down` on either
+  container leaves them running while the other is up.
+
+Anything a profile adds to `CC_EXTRA_RUN_ARGS` (`--cap-add`, a published port)
+widens that container's boundary; read [SECURITY.md](SECURITY.md) first.
+
 ## Configuration
 
 Everything user-specific lives outside the repo, mostly in
@@ -492,6 +543,7 @@ the files every setup needs. The rest are opt-in, and you create them yourself.
 | `pi/` | no | Global pi config ([Running pi](#running-pi-beside-claude-code)); mounted only if it exists when a container starts |
 | `mac-sim.json` | no | The opt-in Xcode (and Android emulator) bridge, from `config/mac-sim.example.json` ([Driving the Mac's Xcode toolchain](#driving-the-macs-xcode-toolchain-from-the-guest)) |
 | `Dockerfile.local` | no | Your own layer on top of the image ([Adding tools](#adding-tools-to-the-image)) |
+| `profiles/<name>.sh` | no | A second container's settings, from `config/profile.example.sh` ([Profiles](#profiles-a-second-isolated-container)) |
 
 Nothing else in that directory is read automatically. A directory of your own
 guest tools needs a `CC_EXTRA_VOLUME_ARGS` entry in `config.sh` (see
@@ -504,13 +556,15 @@ Outside it:
 - **`~/.local/state/cc-container/`** is written by the wrapper itself: the
   versions `cc-container-build` reuses, the proxy's pid and log, the mac-sim
   token and log, and the private `TMPDIR`s of mac-sim commands that declare
-  `private_tmp`. Nothing to set up.
+  `private_tmp`. Each profile records its image versions in its own
+  `image-versions.<name>`. Nothing to set up.
 - **The `cc-home` volume** is the container's home directory: both agents'
   logins, pi packages installed with `pix install`, the container's own Claude
   Code settings (such as the [statusline](#statusline)), trust decisions, and
   the terminfo entries `ccxs` and `ccsh` copy from the Mac (`~/.terminfo`). It
   survives `ccdown` and rebuilds. Deleting it (`container volume delete
-  cc-home`) means logging in and redoing those steps.
+  cc-home`) means logging in and redoing those steps. `CC_HOME_VOLUME` names
+  another volume; each profile should have its own.
 
 On a new Mac, copy `~/.config/cc-container/` from the old one, run `./install.sh`
 (it keeps existing files), `cc-container-build`, and log in again: the
@@ -738,7 +792,9 @@ RUN npm install -g @upstash/context7-mcp@4
 # ...or another runtime, a headless browser, your own CLI
 ```
 
-Its build context is the config directory, so it can `COPY` files from there.
+Its build context is the file's own directory, so it can `COPY` files from
+there. `CC_IMAGE_OVERLAY` names another file (it must then exist), or `""` for
+none; a profile uses it to build its own image.
 This survives `cc-update` untouched: the repo never sees it.
 
 The cost is that you now store two images, `<name>:base` and `<name>:local`.
