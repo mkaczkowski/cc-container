@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+- **Profiles**: `cc-profile <name> <verb>` runs a second container beside the
+  shared session, configured by `~/.config/cc-container/profiles/<name>.sh`
+  (sourced after `config.sh`; start from `config/profile.example.sh`). Verbs:
+  `up`, `down`, `status`, `attach`, `pi`, `shell`, `exec`, `run`, `build`,
+  `upgrade`, `doctor`. New settings for it, usable in `config.sh` too:
+  `CC_HOME_VOLUME` (default `cc-home`), `CC_MCP` and `CC_PI_SYNC` (1; 0 keeps
+  the MCP servers with their `mcp.env` secrets, or the pi config, out of the
+  container), and `CC_IMAGE_OVERLAY` (default `Dockerfile.local` in the config
+  directory; the build context is now that file's directory). Image versions
+  are recorded per profile (`image-versions.<name>`). Hints name the profile's
+  commands. Shell library only, no rebuild.
+- `cc-exec <command> [args...]` runs one command in the shared session as argv,
+  with a TTY only when there is one, and returns its exit code.
+- Fix: `ccdown` stopped the host proxy and the mac-sim shim while other
+  containers were still running. container 1.x reports `.status.state` where
+  older releases had a plain `.status`, so the running-container count was
+  always 0. It now reads both, and when it cannot count it leaves the helpers
+  up and says so.
+- The image installs the system libraries and fonts Playwright's Chromium needs
+  (`playwright install-deps chromium`), so `npx playwright install chromium`
+  followed by headless tests works in a session. The browser download stays per
+  project and lands in the `cc-home` volume. Needs `cc-container-build`.
 - A project command (`run`, `maestro`, `android build`, ...) now ends with one
   fixed stdout line, `mac-sim <command>: exit=<code>`, on success and failure.
   An agent waiting on a backgrounded build matches it; the followed log could

@@ -12,6 +12,15 @@ RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
     && apt-get update && apt-get install -y --no-install-recommends gh \
     && rm -rf /var/lib/apt/lists/*
 
+# System libraries and fonts for Playwright's Chromium, so a project's own
+# Playwright (and the Playwright MCP server) can run headless. Only the apt
+# packages are baked in: the browser itself must match the project's Playwright
+# version, so `npx playwright install chromium` fetches it at run time into
+# ~/.cache/ms-playwright, which lives in the cc-home volume and survives
+# sessions. The npx cache is dropped because /root is shadowed by that volume.
+RUN npx -y playwright@latest install-deps chromium \
+    && rm -rf /var/lib/apt/lists/* /root/.npm
+
 # Yarn/pnpm via corepack, so a repo's packageManager field just works.
 RUN corepack enable
 

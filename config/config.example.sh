@@ -36,6 +36,13 @@
 # CC_SKIP_PERMISSIONS=1
 # Name of the long-lived shared container used by cc-up / cc-attach.
 # CC_SESSION_NAME=cc-session
+# Named volume mounted as the container's home (/root). Only one running
+# container can hold it; a profile running beside the session needs its own.
+# CC_HOME_VOLUME=cc-home
+# 0 keeps the MCP servers (and mcp.env secrets) / the pi config out of the
+# container. Usually set in a profile, not here.
+# CC_MCP=1
+# CC_PI_SYNC=1
 # 1 allows only a Claude.ai subscription login: Claude Code (and pi through
 # pi-claude-bridge) refuses API keys, Console logins, Bedrock and Vertex, and pi
 # refuses to start while it sees such credentials. Recycle a running session
@@ -45,7 +52,15 @@
 # --- adding tools to the image ----------------------------------------------
 # Put a Dockerfile.local next to this file to layer your own tools on top of the
 # repo image (see README "Adding tools to the image"). No setting is needed:
-# cc-container-build picks it up if it exists.
+# cc-container-build picks it up if it exists. CC_IMAGE_OVERLAY names another
+# file (it must exist), or "" for none.
+# CC_IMAGE_OVERLAY="$HOME/.config/cc-container/Dockerfile.local"
+
+# --- profiles ----------------------------------------------------------------
+# A second container beside the shared session, configured by
+# profiles/<name>.sh (start from config/profile.example.sh in the repo).
+# A short name per profile you use:
+# ccworker() { cc-profile worker "$@"; }
 
 # --- extension points --------------------------------------------------------
 # Extra `container run` arguments, applied to one-off runs and the shared

@@ -85,6 +85,17 @@ CC_SUBSCRIPTION_ONLY="${CC_SUBSCRIPTION_ONLY:-0}"
 # Long-lived shared session (cc-up / cc-attach).
 CC_SESSION_NAME="${CC_SESSION_NAME:-cc-session}"
 
+# The named volume mounted as the container's home (/root): both agents'
+# logins, settings and caches. Only one running container can hold a named
+# volume, so a profile that runs beside the shared session needs its own.
+CC_HOME_VOLUME="${CC_HOME_VOLUME:-cc-home}"
+
+# 1 mounts the declarative MCP list (and passes mcp.env) and the pi config into
+# every container; 0 leaves both out, so neither the servers nor their secrets
+# reach it. A profile for unattended work usually wants 0.
+CC_MCP="${CC_MCP:-1}"
+CC_PI_SYNC="${CC_PI_SYNC:-1}"
+
 # The mac-sim bridge: scoped guest access to the Mac's Xcode/simctl toolchain.
 # Xcode is macOS-only and a Linux guest can never run it, so host/mac-sim-shim.py
 # exposes a fixed allowlist of verbs on the bridge address and guest/mac-sim
@@ -119,6 +130,28 @@ CC_EXTRA_RUN_ARGS=(${CC_EXTRA_RUN_ARGS+"${CC_EXTRA_RUN_ARGS[@]}"})
 # to create a session from values the file no longer has.
 _CC_CONFIG_LOADED_MTIME="$(stat -f %m "${CC_CONFIG_DIR}/config.sh" 2>/dev/null)"
 
+# --- profile ----------------------------------------------------------------
+# CC_PROFILE=<name> layers ${CC_CONFIG_DIR}/profiles/<name>.sh over config.sh:
+# a second container with its own name, home volume, image, mounts and size,
+# running beside the shared session. It is set by cc-profile, which sources this
+# file in a fresh shell: every setting is bound when this file is sourced, so a
+# shell that loaded the default config cannot switch to a profile in place.
+CC_PROFILE="${CC_PROFILE:-}"
+if [ -n "${CC_PROFILE}" ]; then
+  case "${CC_PROFILE}" in
+    *[!A-Za-z0-9_-]*)
+      echo "cc-container: CC_PROFILE must be letters, digits, '-' or '_', got '${CC_PROFILE}'" >&2
+      return 1 ;;
+  esac
+  if [ ! -r "${CC_CONFIG_DIR}/profiles/${CC_PROFILE}.sh" ]; then
+    echo "cc-container: CC_PROFILE=${CC_PROFILE} but ${CC_CONFIG_DIR}/profiles/${CC_PROFILE}.sh does not exist." >&2
+    echo "  Start one from ${CC_CONTAINER_REPO}/config/profile.example.sh" >&2
+    return 1
+  fi
+  # shellcheck source=/dev/null
+  . "${CC_CONFIG_DIR}/profiles/${CC_PROFILE}.sh"
+fi
+
 CC_SESSION_CPUS="${CC_SESSION_CPUS:-$(_cc_half_cpus)}"
 CC_SESSION_MEMORY="${CC_SESSION_MEMORY:-$(_cc_default_memory_gb)g}"
 CC_PROXY_URL="http://${CC_PROXY_HOST}:${CC_PROXY_PORT}"
@@ -128,7 +161,13 @@ CC_PI_DIR="${CC_PI_DIR:-${CC_CONFIG_DIR}/pi}"
 CC_MCP_ENV_FILE="${CC_MCP_ENV_FILE:-${CC_CONFIG_DIR}/mcp.env}"
 CC_PROXY_PID_FILE="${CC_STATE_DIR}/tinyproxy.pid"
 CC_EGRESS_STATE="${CC_STATE_DIR}/egress"
-CC_IMAGE_VERSIONS="${CC_STATE_DIR}/image-versions"
+# Per profile, so building one image never changes the agent versions another
+# image is pinned to.
+CC_IMAGE_VERSIONS="${CC_IMAGE_VERSIONS:-${CC_STATE_DIR}/image-versions${CC_PROFILE:+.${CC_PROFILE}}}"
+# The Dockerfile layered on the repo image. Set it to an empty string for none.
+# Only the default path may be absent; a path you set must exist.
+_CC_IMAGE_OVERLAY_DEFAULT="${CC_CONFIG_DIR}/Dockerfile.local"
+CC_IMAGE_OVERLAY="${CC_IMAGE_OVERLAY-${_CC_IMAGE_OVERLAY_DEFAULT}}"
 
 # ---------------------------------------------------------------------------
 # MCP servers
@@ -152,6 +191,7 @@ CC_IMAGE_VERSIONS="${CC_STATE_DIR}/image-versions"
 # that the secret is not sitting in a JSON file you might commit or share.
 # ---------------------------------------------------------------------------
 _cc_mcp_args() {
+  [ "${CC_MCP}" = "1" ] || return 0
   [ -r "${CC_MCP_DIR}/mcp-servers.json" ] || return 0
   printf '%s\0' --volume "${CC_MCP_DIR}:/opt/cc-mcp:ro"
   [ -r "${CC_MCP_ENV_FILE}" ] || return 0
@@ -169,6 +209,7 @@ _cc_mcp_args() {
 # keybindings.json, extensions/, prompts/). Mounted as a DIRECTORY for the same
 # reason as the MCP list, and merged into ~/.pi/agent by guest/pi-config-sync.
 _cc_pi_args() {
+  [ "${CC_PI_SYNC}" = "1" ] || return 0
   [ -d "${CC_PI_DIR}" ] || return 0
   printf '%s\0' --volume "${CC_PI_DIR}:/opt/cc-pi:ro"
 }
@@ -198,6 +239,11 @@ _cc_attach_guard() {
 
 _cc_mcp_collect() {
   CC_MCP_ARGS=()
+  case "${CC_MCP}:${CC_PI_SYNC}" in
+    [01]:[01]) ;;
+    *) echo "cc-container: CC_MCP and CC_PI_SYNC must be 0 or 1, got CC_MCP='${CC_MCP}' CC_PI_SYNC='${CC_PI_SYNC}'" >&2
+       return 1 ;;
+  esac
   local arg
   while IFS= read -r -d '' arg; do
     CC_MCP_ARGS+=("${arg}")
@@ -515,14 +561,14 @@ _cc_run() {
   _cc_proxy_collect || return 1
   _cc_sim_auto_up || return 1
   _cc_call_hook "${CC_PRE_RUN_HOOK}" CC_PRE_RUN_HOOK || return 1
-  _cc_mcp_collect
+  _cc_mcp_collect || return 1
   _cc_policy_collect || return 1
   # -it needs a real TTY; fall back for piped/scripted use (e.g. claude -p).
   local tty_args=()
   if [ -t 0 ] && [ -t 1 ]; then tty_args=(-it); fi
   _cc_awake ${agent_env+"${agent_env[@]}"} container run --rm "${tty_args[@]}" \
     --volume "${PWD}:${PWD}" \
-    --volume "cc-home:/root" \
+    --volume "${CC_HOME_VOLUME}:/root" \
     --volume "${CC_CONTAINER_REPO}/guest:/opt/cc-tools:ro" \
     ${CC_EXTRA_VOLUME_ARGS+"${CC_EXTRA_VOLUME_ARGS[@]}"} \
     ${CC_MCP_ARGS+"${CC_MCP_ARGS[@]}"} \
@@ -545,7 +591,7 @@ pi-container() { _cc_run --pi "$@"; }
 # ---------------------------------------------------------------------------
 # Multi-session mode
 #
-# Only one container can hold the cc-home volume at a time, so parallel
+# Only one container can hold a home volume (cc-home) at a time, so parallel
 # `cc-container` runs fail with "storage device attachment is invalid". To run
 # several Claude Code instances at once, start ONE long-lived container and
 # attach to it from as many terminals as you like.
@@ -554,6 +600,11 @@ pi-container() { _cc_run --pi "$@"; }
 #   cc-attach        # in each terminal window (pi-attach for pi)
 #   cc-down          # when finished
 # ---------------------------------------------------------------------------
+# The command a hint should name: the profile's form when one is active.
+_cc_cmd() {
+  if [ -n "${CC_PROFILE}" ]; then echo "cc-profile ${CC_PROFILE} $1"; else echo "$2"; fi
+}
+
 _cc_session_state() {
   container inspect "${CC_SESSION_NAME}" 2>/dev/null \
     | jq -r '.[0].status.state // empty' 2>/dev/null
@@ -592,14 +643,14 @@ cc-up() {
   _cc_proxy_collect || return 1
   _cc_sim_auto_up || return 1
   _cc_call_hook "${CC_PRE_RUN_HOOK}" CC_PRE_RUN_HOOK || return 1
-  _cc_mcp_collect
+  _cc_mcp_collect || return 1
   _cc_policy_collect || return 1
   local state size; state="$(_cc_session_state)"
   if [ -n "${state}" ]; then
     size="$(_cc_session_size_change)" || return 1
   fi
   if [ "${state}" = "running" ]; then
-    echo "${CC_SESSION_NAME} already running. Attach with: cc-attach"
+    echo "${CC_SESSION_NAME} already running. Attach with: $(_cc_cmd attach cc-attach)"
     [ -n "${size}" ] && echo "note: ${size}. ccdown && ccup applies it (it ends attached sessions)."
     return 0
   fi
@@ -618,7 +669,7 @@ cc-up() {
       --cpus "${CC_SESSION_CPUS}" \
       --memory "${CC_SESSION_MEMORY}" \
       --volume "${PWD}:${PWD}" \
-      --volume "cc-home:/root" \
+      --volume "${CC_HOME_VOLUME}:/root" \
       --volume "${CC_CONTAINER_REPO}/guest:/opt/cc-tools:ro" \
       ${CC_EXTRA_VOLUME_ARGS+"${CC_EXTRA_VOLUME_ARGS[@]}"} \
       ${CC_MCP_ARGS+"${CC_MCP_ARGS[@]}"} \
@@ -633,7 +684,7 @@ cc-up() {
       "${CC_CONTAINER_IMAGE}" -c '/opt/cc-tools/cc-workspace-link && exec sleep infinity' || return 1
   fi
   _cc_sim_release_probe
-  echo "${CC_SESSION_NAME} up, mounting ${PWD}. Attach with: cc-attach"
+  echo "${CC_SESSION_NAME} up, mounting ${PWD}. Attach with: $(_cc_cmd attach cc-attach)"
 }
 
 # The host path the shared session mounts, read from the container itself
@@ -662,7 +713,7 @@ _cc_attach_workdir() {
 
 cc-attach() {
   if [ "$(_cc_session_state)" != "running" ]; then
-    echo "cc-attach: ${CC_SESSION_NAME} is not running. Start it with cc-up." >&2
+    echo "cc-attach: ${CC_SESSION_NAME} is not running. Start it with $(_cc_cmd up cc-up)." >&2
     return 1
   fi
   local tty_args=()
@@ -688,7 +739,7 @@ cc-attach() {
 # cc-home volume, so pi's state lives in /root/.pi/agent beside ~/.claude.
 pi-attach() {
   if [ "$(_cc_session_state)" != "running" ]; then
-    echo "pi-attach: ${CC_SESSION_NAME} is not running. Start it with cc-up." >&2
+    echo "pi-attach: ${CC_SESSION_NAME} is not running. Start it with $(_cc_cmd up cc-up)." >&2
     return 1
   fi
   local tty_args=()
@@ -710,7 +761,7 @@ pi-attach() {
 
 cc-attach-shell() {
   if [ "$(_cc_session_state)" != "running" ]; then
-    echo "cc-attach-shell: ${CC_SESSION_NAME} is not running. Start it with cc-up." >&2
+    echo "cc-attach-shell: ${CC_SESSION_NAME} is not running. Start it with $(_cc_cmd up cc-up)." >&2
     return 1
   fi
   local tty_args=()
@@ -721,6 +772,62 @@ cc-attach-shell() {
     "${CC_SESSION_NAME}" /opt/cc-tools/cc-terminfo-sync || return 1
   _cc_awake container exec "${tty_args[@]}" --env TERM --workdir "${workdir}" \
     "${CC_SESSION_NAME}" /bin/bash "$@"
+}
+
+# Run one command in the shared session, from the caller's directory when that
+# is inside the mount. Unlike `ccxs -c` it takes argv rather than a shell
+# string, and it is meant for scripts on the Mac: a TTY only when there is one,
+# and the command's exit code is returned.
+cc-exec() {
+  if [ "$#" -eq 0 ]; then
+    echo "cc-exec: usage: cc-exec <command> [args...]" >&2
+    return 1
+  fi
+  if [ "$(_cc_session_state)" != "running" ]; then
+    echo "cc-exec: ${CC_SESSION_NAME} is not running. Start it with $(_cc_cmd up cc-up)." >&2
+    return 1
+  fi
+  local tty_args=()
+  if [ -t 0 ] && [ -t 1 ]; then tty_args=(-it); fi
+  local workdir; workdir="$(_cc_attach_workdir)" || return 1
+  _cc_awake container exec ${tty_args+"${tty_args[@]}"} --env TERM --workdir "${workdir}" \
+    "${CC_SESSION_NAME}" "$@"
+}
+
+# Run a command against a profile: cc-profile <name> <verb> [args...]. It
+# sources this file again in a fresh shell with CC_PROFILE=<name>, so the
+# profile's settings never leak into the calling shell. Give a profile you use
+# often a short name in config.sh:  ccbench() { cc-profile bench "$@"; }
+cc-profile() {
+  local name="${1:-}" verb="${2:-}" fn
+  if [ -z "${name}" ] || [ -z "${verb}" ]; then
+    echo "cc-profile: usage: cc-profile <name> <up|down|status|attach|pi|shell|exec|run|build|upgrade|doctor> [args...]" >&2
+    return 1
+  fi
+  shift 2
+  case "${verb}" in
+    up)      fn=cc-up ;;
+    down)    fn=cc-down ;;
+    status)  fn=cc-status ;;
+    attach)  fn=cc-attach ;;
+    pi)      fn=pi-attach ;;
+    shell)   fn=cc-attach-shell ;;
+    exec)    fn=cc-exec ;;
+    run)     fn=cc-container ;;
+    build)   fn=cc-container-build ;;
+    upgrade) fn=cc-container-upgrade ;;
+    doctor)  fn=cc-doctor ;;
+    *) echo "cc-profile: unknown verb '${verb}'; use up, down, status, attach, pi, shell, exec, run, build, upgrade or doctor" >&2
+       return 1 ;;
+  esac
+  local sh flags=() repo="${CC_CONTAINER_REPO}"
+  if [ -n "${ZSH_VERSION:-}" ]; then sh=zsh; flags=(-f); else sh=bash; flags=(--noprofile --norc); fi
+  # The script is expanded by the child shell, not here: hence single quotes.
+  # shellcheck disable=SC2016
+  CC_PROFILE="${name}" CC_CONTAINER_REPO="${repo}" \
+    CC_CONFIG_DIR="${CC_CONFIG_DIR}" CC_STATE_DIR="${CC_STATE_DIR}" \
+    "${sh}" "${flags[@]}" -c '. "$1" || exit 1; shift; "$@"' cc-profile \
+    "${repo}/bin/cc-container.sh" "${fn}" "$@"
 }
 
 # From a herdr pane: create a git worktree under <repo>/.claude/worktrees/<name>
@@ -745,7 +852,7 @@ _cc_worktree() {
     return 1
   fi
   if [ "$(_cc_session_state)" != "running" ]; then
-    echo "${caller}: ${CC_SESSION_NAME} is not running. Start it with cc-up." >&2
+    echo "${caller}: ${CC_SESSION_NAME} is not running. Start it with $(_cc_cmd up cc-up)." >&2
     return 1
   fi
   local common root mount
@@ -775,13 +882,27 @@ pi-worktree() { _cc_worktree pi-worktree pix "$@"; }
 
 # Running containers other than the shared session and the build helper, i.e.
 # anything that might still need the proxy or the sim shim.
+#
+# Fails safe: when the count cannot be read it reports 1, so cc-down leaves the
+# helpers up rather than cutting the network of a container it cannot see.
+# Older container releases report .status as a string, 1.x as .status.state.
 _cc_other_containers() {
-  container list --format json 2>/dev/null \
-    | jq -r --arg name "${CC_SESSION_NAME}" \
-        '[.[] | select(.status == "running")
+  local json n
+  if ! json="$(container list --format json)"; then
+    echo "cc-container: cannot list containers; leaving the host helpers up" >&2
+    echo 1
+    return 0
+  fi
+  n="$(printf '%s' "${json}" | jq -r --arg name "${CC_SESSION_NAME}" \
+        '[.[] | select((if (.status | type) == "object" then .status.state else .status end) == "running")
               | .configuration.id // .id
-              | select(. != $name and (startswith("buildkit") | not))] | length' \
-      2>/dev/null || echo 0
+              | select(. != $name and (startswith("buildkit") | not))] | length')"
+  case "${n}" in
+    ''|*[!0-9]*)
+      echo "cc-container: cannot count running containers (jq said '${n}'); leaving the host helpers up" >&2
+      echo 1 ;;
+    *) echo "${n}" ;;
+  esac
 }
 
 _cc_session_remove() {
@@ -806,6 +927,7 @@ cc-down() {
 }
 
 cc-status() {
+  [ -n "${CC_PROFILE}" ] && echo "profile:  ${CC_PROFILE} (home volume ${CC_HOME_VOLUME}, image ${CC_CONTAINER_IMAGE})"
   echo "runtime:  $(container system status 2>/dev/null | awk '/status/{print $NF; exit}')"
   case "${CC_PROXY}" in
     off) echo "proxy:    disabled (CC_PROXY=off)" ;;
@@ -828,21 +950,21 @@ cc-status() {
   # stopped container has no IP, so column offsets shift and produce garbage.
   local info
   info="$(container inspect "${CC_SESSION_NAME}" 2>/dev/null \
-    | jq -r '.[0] | [
+    | jq -r --arg home "${CC_HOME_VOLUME}" '.[0] | [
         .status.state,
         (.configuration.resources.cpus|tostring),
         ((.configuration.resources.memoryInBytes / 1073741824)|floor|tostring),
-        ([.configuration.mounts[]?.source | select(test("cc-home")|not)]|first // "-")
+        ([.configuration.mounts[]?.source | select(contains("/volumes/" + $home + "/")|not)]|first // "-")
       ] | @tsv' 2>/dev/null)"
   if [ -z "${info}" ]; then
-    echo "session:  not running (start with: ccup)"
+    echo "session:  not running (start with: $(_cc_cmd up ccup))"
     return 0
   fi
   local state cpus mem mount
   IFS="$(printf '\t')" read -r state cpus mem mount <<< "${info}"
   echo "session:  ${CC_SESSION_NAME} ${state} | ${cpus} cpus, ${mem} GB"
   echo "mount:    ${mount}"
-  if [ "${state}" = "running" ]; then echo "attach:   ccx (Claude Code), pix (pi)"; else echo "start:    ccup   (restarts it)"; fi
+  if [ "${state}" = "running" ]; then echo "attach:   $(_cc_cmd attach ccx) (Claude Code), $(_cc_cmd pi pix) (pi)"; else echo "start:    $(_cc_cmd up ccup)   (restarts it)"; fi
 }
 
 # ---------------------------------------------------------------------------
@@ -948,8 +1070,10 @@ cc-doctor() {
 # versions are the npm install layers' cache keys, so passing the same value
 # again replays the cached layer rather than reinstalling.
 #
-# If ~/.config/cc-container/Dockerfile.local exists, the repo image is built as
-# <name>:base and your file is built on top of it as the real image. That is the
+# If CC_IMAGE_OVERLAY (default ~/.config/cc-container/Dockerfile.local) exists,
+# the repo image is built as <name>:base and your file is built on top of it as
+# the real image. Profiles that build their own image should use a different
+# image NAME, not just a tag, so the two builds never share a <name>:base. That is the
 # supported way to add tools (extra MCP server packages, another runtime, a
 # headless browser) without forking the repo's Dockerfile and without this
 # project needing a flag per use case. Start it with:
@@ -958,7 +1082,7 @@ cc-doctor() {
 #   FROM ${BASE_IMAGE}
 #   RUN npm install -g @some/mcp-server
 #
-# Its build context is the config directory, so it can COPY files from there.
+# Its build context is the overlay's directory, so it can COPY files from there.
 _cc_saved_version() {
   [ -r "${CC_IMAGE_VERSIONS}" ] || return 0
   sed -n "s/^$1=//p" "${CC_IMAGE_VERSIONS}" | tail -1
@@ -983,8 +1107,12 @@ cc-container-build() {
     args+=(--build-arg "http_proxy=${CC_PROXY_URL}" --build-arg "https_proxy=${CC_PROXY_URL}"
            --build-arg "HTTP_PROXY=${CC_PROXY_URL}" --build-arg "HTTPS_PROXY=${CC_PROXY_URL}")
   fi
-  local overlay="${CC_CONFIG_DIR}/Dockerfile.local"
-  if [ ! -r "${overlay}" ]; then
+  local overlay="${CC_IMAGE_OVERLAY}"
+  if [ -n "${overlay}" ] && [ ! -r "${overlay}" ] && [ "${overlay}" != "${_CC_IMAGE_OVERLAY_DEFAULT}" ]; then
+    echo "cc-container-build: CC_IMAGE_OVERLAY=${overlay} does not exist; fix the path or set it to an empty string for no overlay" >&2
+    return 1
+  fi
+  if [ -z "${overlay}" ] || [ ! -r "${overlay}" ]; then
     container build ${args+"${args[@]}"} \
       -t "${CC_CONTAINER_IMAGE}" "${CC_CONTAINER_REPO}/image" || return 1
     _cc_save_versions "${cc_version}" "${pi_version}"
@@ -999,7 +1127,7 @@ cc-container-build() {
   _cc_save_versions "${cc_version}" "${pi_version}"
   echo "Applying ${overlay} on top, as ${CC_CONTAINER_IMAGE}..."
   container build ${args+"${args[@]}"} --build-arg "BASE_IMAGE=${base}" \
-    -f "${overlay}" -t "${CC_CONTAINER_IMAGE}" "${CC_CONFIG_DIR}"
+    -f "${overlay}" -t "${CC_CONTAINER_IMAGE}" "$(dirname "${overlay}")"
 }
 
 # ---------------------------------------------------------------------------
