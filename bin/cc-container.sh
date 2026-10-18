@@ -85,6 +85,15 @@ CC_SUBSCRIPTION_ONLY="${CC_SUBSCRIPTION_ONLY:-0}"
 # Long-lived shared session (cc-up / cc-attach).
 CC_SESSION_NAME="${CC_SESSION_NAME:-cc-session}"
 
+# Free space on the Mac's data volume, in GB. The VM disks, the home volumes,
+# the images and every mounted checkout all live there, and when it fills, a
+# running guest's root file system hits I/O errors and turns read-only until
+# the container is recreated. Starting a container or a build below
+# CC_DISK_MIN_GB is refused; below CC_DISK_WARN_GB every command warns.
+# CC_DISK_MIN_GB=0 turns the refusal off.
+CC_DISK_WARN_GB="${CC_DISK_WARN_GB:-25}"
+CC_DISK_MIN_GB="${CC_DISK_MIN_GB:-10}"
+
 # The named volume mounted as the container's home (/root): both agents'
 # logins, settings and caches. Only one running container can hold a named
 # volume, so a profile that runs beside the shared session needs its own.
@@ -310,6 +319,37 @@ cc-runtime-up() {
     echo "cc-container: failed to start the container runtime; run 'container system start' manually" >&2
     return 1
   fi
+}
+
+# Free GB on the volume that holds $HOME (the Mac's data volume).
+_cc_free_gb() { df -Pk "${HOME}" | awk 'NR==2 {printf "%d", $4 / 1048576}'; }
+
+# Guard a command that can grow the Mac's disk usage. "enforce" refuses below
+# CC_DISK_MIN_GB; "warn" only warns (attaching to a running session allocates
+# nothing new, and refusing it would only stop you from cleaning up from inside).
+_cc_disk_guard() {
+  local mode="$1" free
+  case "${CC_DISK_WARN_GB}:${CC_DISK_MIN_GB}" in
+    *[!0-9:]*|:*|*:)
+      echo "cc-container: CC_DISK_WARN_GB and CC_DISK_MIN_GB must be whole numbers of GB, got '${CC_DISK_WARN_GB}' and '${CC_DISK_MIN_GB}'" >&2
+      return 1 ;;
+  esac
+  free="$(_cc_free_gb)"
+  case "${free}" in
+    ''|*[!0-9]*) echo "cc-container: cannot read the free space of ${HOME} from df (got '${free}')" >&2; return 1 ;;
+  esac
+  if [ "${mode}" = "enforce" ] && [ "${CC_DISK_MIN_GB}" -gt 0 ] && [ "${free}" -lt "${CC_DISK_MIN_GB}" ]; then
+    echo "cc-container: only ${free} GB free on the Mac (CC_DISK_MIN_GB=${CC_DISK_MIN_GB}); refusing to start." >&2
+    echo "  A full disk turns running guests' root file systems read-only. Free space first:" >&2
+    echo "    container system df            # what images, containers and volumes take" >&2
+    echo "    container image prune -a       # unused images (rebuilt when next needed)" >&2
+    echo "  Or run this one command anyway: CC_DISK_MIN_GB=0 <command>" >&2
+    return 1
+  fi
+  if [ "${free}" -lt "${CC_DISK_WARN_GB}" ]; then
+    echo "cc-container: warning: only ${free} GB free on the Mac (CC_DISK_WARN_GB=${CC_DISK_WARN_GB}). Builds, installs and simulators need tens of GB; see 'container system df'." >&2
+  fi
+  return 0
 }
 
 # Is the proxy wanted for this run?
@@ -558,6 +598,7 @@ _cc_run() {
       [ -n "${flag}" ] && default_flags=("${flag}") ;;
   esac
   cc-runtime-up || return 1
+  _cc_disk_guard enforce || return 1
   _cc_proxy_collect || return 1
   _cc_sim_auto_up || return 1
   _cc_call_hook "${CC_PRE_RUN_HOOK}" CC_PRE_RUN_HOOK || return 1
@@ -640,6 +681,7 @@ _cc_session_size_change() {
 cc-up() {
   _cc_config_current || return 1
   cc-runtime-up || return 1
+  _cc_disk_guard enforce || return 1
   _cc_proxy_collect || return 1
   _cc_sim_auto_up || return 1
   _cc_call_hook "${CC_PRE_RUN_HOOK}" CC_PRE_RUN_HOOK || return 1
@@ -712,6 +754,7 @@ _cc_attach_workdir() {
 }
 
 cc-attach() {
+  _cc_disk_guard warn || return 1
   if [ "$(_cc_session_state)" != "running" ]; then
     echo "cc-attach: ${CC_SESSION_NAME} is not running. Start it with $(_cc_cmd up cc-up)." >&2
     return 1
@@ -738,6 +781,7 @@ cc-attach() {
 # The pi counterpart of cc-attach. Both agents share the container and the
 # cc-home volume, so pi's state lives in /root/.pi/agent beside ~/.claude.
 pi-attach() {
+  _cc_disk_guard warn || return 1
   if [ "$(_cc_session_state)" != "running" ]; then
     echo "pi-attach: ${CC_SESSION_NAME} is not running. Start it with $(_cc_cmd up cc-up)." >&2
     return 1
@@ -760,6 +804,7 @@ pi-attach() {
 }
 
 cc-attach-shell() {
+  _cc_disk_guard warn || return 1
   if [ "$(_cc_session_state)" != "running" ]; then
     echo "cc-attach-shell: ${CC_SESSION_NAME} is not running. Start it with $(_cc_cmd up cc-up)." >&2
     return 1
@@ -779,6 +824,7 @@ cc-attach-shell() {
 # string, and it is meant for scripts on the Mac: a TTY only when there is one,
 # and the command's exit code is returned.
 cc-exec() {
+  _cc_disk_guard warn || return 1
   if [ "$#" -eq 0 ]; then
     echo "cc-exec: usage: cc-exec <command> [args...]" >&2
     return 1
@@ -995,9 +1041,11 @@ cc-doctor() {
   # The VM's disks, the images and every bind-mounted checkout share the Mac's
   # data volume. When it fills, the guest's root file system goes read-only.
   local free_gb reclaim
-  free_gb="$(df -Pk "${HOME}" | awk 'NR==2 {printf "%d", $4 / 1048576}')"
-  if [ "${free_gb}" -lt 20 ]; then
-    _p "mac free disk" "LOW ${free_gb} GB - a session's builds and simulators need tens of GB"
+  free_gb="$(_cc_free_gb)"
+  if [ "${free_gb}" -lt "${CC_DISK_MIN_GB}" ]; then
+    _p "mac free disk" "TOO LOW ${free_gb} GB - under CC_DISK_MIN_GB=${CC_DISK_MIN_GB}, so containers and builds are refused"
+  elif [ "${free_gb}" -lt "${CC_DISK_WARN_GB}" ]; then
+    _p "mac free disk" "LOW ${free_gb} GB - under CC_DISK_WARN_GB=${CC_DISK_WARN_GB}; builds and simulators need tens of GB"
   else
     _p "mac free disk" "${free_gb} GB"
   fi
@@ -1097,6 +1145,7 @@ _cc_save_versions() {
 
 cc-container-build() {
   cc-runtime-up || return 1
+  _cc_disk_guard enforce || return 1
   _cc_proxy_collect || return 1
   local cc_version="${1:-$(_cc_saved_version CC_VERSION)}"
   local pi_version="${2:-$(_cc_saved_version PI_VERSION)}"
