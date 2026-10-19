@@ -111,6 +111,28 @@ Narrow a prefix to your own account (`https://github.com/<you>/`) to keep a gues
 agent from opening anything else there. Any page under an allowed prefix can
 still be opened, with whatever query string the guest puts in the URL.
 
+### Forwarding a console port to the container
+
+A project command can keep a port open on the Mac for a service in the
+container. `console-forward` is the example: it listens on
+`127.0.0.1:<console_port>` on the Mac and relays to the train console at
+`<guest>`. Use it when the Mac cannot reach the container's subnet directly,
+for example when another network tool captures that subnet.
+
+The relay outlives the request, so declare it `detach` with a `ready_url`
+([Declaring a project command](#declaring-a-project-command)). Both params are
+validated, so only the console's address and a port in the range can be used:
+
+```json
+"console-forward": {
+  "argv": ["node", "tools/train/consoleForward.mjs", "--guest", "{guest}", "--port", "{console_port}"],
+  "params": {
+    "guest": { "pattern": "^192\\.168\\.64\\.([2-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-4])$" },
+    "console_port": { "pattern": "^43[2-4][0-9]$", "default": "4320" }
+  }
+}
+```
+
 ## Worktrees
 
 Every command runs in **the checkout you call it from**, so a session started
