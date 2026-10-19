@@ -119,9 +119,10 @@ container. `console-forward` is the example: it listens on
 `<guest>`. Use it when the Mac cannot reach the container's subnet directly,
 for example when another network tool captures that subnet.
 
-The relay outlives the request, so declare it `detach` with a `ready_url`
-([Declaring a project command](#declaring-a-project-command)). Both params are
-validated, so only the console's address and a port in the range can be used:
+`console-forward` is a plain command. It starts the relay detached and exits once
+the port answers. The relay manages its own lifetime, so the command's `timeout`
+only bounds the start. Both params are validated, so only the console's address
+and a port in the range can be used:
 
 ```json
 "console-forward": {
