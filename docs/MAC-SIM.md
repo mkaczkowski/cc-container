@@ -50,7 +50,7 @@ mac-sim build                             # xcodebuild the declared workspace
 mac-sim terminate | uninstall | shutdown | gui
 mac-sim -d "iPhone 16" boot               # target another device
 
-mac-sim commands                          # what this project declares
+mac-sim commands                          # what this project declares (or: projects)
 mac-sim run                               # a declared project command
 mac-sim run --profile e2e                 # ...in its "e2e" variant
 mac-sim metro start --profile e2e         # `<cmd> start` is the command itself
@@ -453,6 +453,94 @@ ready: yes
 The bundler line is the only way to learn which build profile a running bundler
 carries: its flags are inlined when it starts and it cannot report them. A
 bundler started outside mac-sim is reported as such, with its profile unknown.
+
+## JSON output for scripts
+
+The text above is for people and agents. A tool that parses mac-sim's answers
+passes `--json` instead and gets one JSON object on stdout:
+
+```
+mac-sim status --json            # also with --sim NAME
+mac-sim lock --json              # release --json and reset --json too
+mac-sim sim list --json
+mac-sim projects --json          # same as commands --json
+mac-sim android status --json    # also with -d NAME
+mac-sim android list --json
+mac-sim android lock --json      # release and reset too
+```
+
+Exit codes are the same as without `--json`: `status --json` exits 0 only when
+`ready` is true, and a busy claim still exits 75. When the host step fails there
+is no object: stdout stays empty and the error goes to stderr. `--json` is
+written after the verb, and needs a shim that has it (`cc-sim-down && cc-sim-up`
+after updating; an older one is refused with that hint, never answered in text).
+
+Every object carries `"schemaVersion": 1`. A new field keeps the version; a field
+renamed, removed or changed in meaning bumps it and is listed here. Check it,
+and fail on a version you do not know. Paths are guest paths, as in the text
+output. Times (`at`, `started`, `created`) are Unix seconds; `age` and `elapsed`
+are whole seconds.
+
+`status` (iOS):
+
+```json
+{
+  "schemaVersion": 1,
+  "platform": "ios",
+  "project": "my-app",
+  "lock": "my-app",
+  "ready": false,
+  "blockers": ["no bundler", "app not running"],
+  "device": {"name": "iPhone 17 Pro", "udid": "ACAB998C-...", "state": "Booted",
+             "booted": true, "sim": null},
+  "claim": {"workdir": "/Users/you/dev/my-app", "verb": "run", "at": 1792495986.1,
+            "age": 12, "expired": false},
+  "executing": null,
+  "bundler": {"port": 8081, "serving": false, "started_by_mac_sim": false,
+              "command": null, "variant": null, "workdir": null, "started": null},
+  "app": {"bundle_id": "com.example.app", "running": false}
+}
+```
+
+- `device.sim` is the private simulator's name, or null on the shared one.
+- `claim` is null when nobody holds it. `expired` means its `lock.ttl` has passed
+  and another checkout may take it without `-f`.
+- `executing` is null, or `{"verb", "pid", "workdir", "log", "elapsed"}` for the
+  command running now (`pid` is null while it starts).
+- `bundler` is null when the project declares no `port`. `variant` is null both
+  for the default profile and when the bundler was not started through mac-sim;
+  `started_by_mac_sim` tells them apart.
+- `app` is null when the project declares no `bundle_id`.
+- `blockers` holds the same reasons as the text's `ready: no (...)` line.
+
+`android status` has the same top-level fields, with `"platform": "android"`,
+`device` as `{"name", "avd", "serial", "state", "booted"}` (`state` is adb's, or
+null when no emulator holds the port) and `app` as `{"package", "installed",
+"running", "debuggable"}`, each null while the emulator is not booted.
+
+`lock` answers `{"schemaVersion", "lock", "action": null, "claim", "executing"}`.
+`release` and `reset` answer `{"schemaVersion", "lock", "action", "stopped"}`,
+where `stopped` is the command a reset killed (`{"verb", "pid", "elapsed",
+"workdir"}`) or null.
+
+`sim list` answers `{"schemaVersion", "project", "max", "simulators": [...]}`,
+one entry per private simulator, sorted by name: `{"name", "state", "udid",
+"port", "workdir", "created", "age", "claim"}`. `state` is simctl's (`Booted`,
+`Shutdown`, ...), `creating` while `sim create` runs, or `gone` when the
+simulator was deleted outside mac-sim.
+
+`android list` answers `{"schemaVersion", "project", "package", "default",
+"emulators": [{"name", "avd", "serial", "port", "default"}], "avds": [...],
+"attached": [{"serial", "state", ...}]}`. `avds` is every AVD on the Mac;
+`attached` is `adb devices -l`, one object per device with its `key:value`
+properties as fields.
+
+`projects` (and `commands`) answers `{"schemaVersion", "checkout", "lock_ttl",
+"projects": {...}}`. `checkout` is the checkout this call acts on (null outside
+one); `projects` is the shim's `/health` description of each declared project:
+its `root`, `owner`, `executing`, `defaults`, `pull` aliases, `simulators`,
+`android` emulators and `commands` (each with `platform`, `variants` and
+`params`).
 
 ## Running mac-sim on the Mac
 
