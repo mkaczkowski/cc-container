@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- **`mac-sim` on the Mac.** Sourcing `bin/cc-container.sh` appends `host/bin`
+  to `PATH`, and `host/bin/mac-sim` runs the guest CLI against the shim with
+  the containers' token. A tool on the Mac (a task runner, a local agent
+  session) then drives the simulators under the same claims as the sessions in
+  containers. Needs a running shim (`cc-sim-up`). See `docs/MAC-SIM.md`,
+  "Running mac-sim on the Mac".
+- `config/profile.runner.example.sh`: a profile for an agent runner,
+  subscription-only, with the mac-sim bridge and nothing else of yours
+  mounted, sized for about four sessions. README "Profiles" covers its own
+  login on its own home volume.
 - **Free-disk guard.** `ccup`, `ccrun`, `pirun`, `ccsh`, a profile's `up` and
   `run`, and `cc-container-build` refuse to start with less than
   `CC_DISK_MIN_GB` (default 10) free on the Mac, naming `container system df`

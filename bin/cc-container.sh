@@ -116,6 +116,14 @@ CC_SIM_TOKEN_FILE="${CC_SIM_TOKEN_FILE:-${CC_STATE_DIR}/mac-sim.token}"
 CC_SIM_LOG="${CC_SIM_LOG:-${CC_STATE_DIR}/mac-sim-shim.log}"
 CC_SIM_AUTO="${CC_SIM_AUTO:-1}"
 
+# host/bin holds commands for the Mac itself: `mac-sim` there drives the same
+# shim from a Mac-side tool. Appended, and only once, so it never shadows a
+# command of yours and re-sourcing this file does not stack copies.
+case ":${PATH}:" in
+  *":${CC_CONTAINER_REPO}/host/bin:"*) ;;
+  *) PATH="${PATH}:${CC_CONTAINER_REPO}/host/bin" ;;
+esac
+
 # Extension points, for host-side tooling this project does not ship. (The
 # mac-sim bridge above is the one exception, because it is inert until you
 # declare a project; everything else of your own goes through these.)
