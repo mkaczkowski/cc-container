@@ -123,7 +123,13 @@ DIRECT_VERBS = {"sim_create", "sim_delete", "sim_list", "pull", "status"}
 # simulator" into "act on the shared one". The guest checks this list before
 # sending such a field, so a stale shim is reported instead of obeyed wrongly.
 FEATURES = ["appearance", "locale", "pull", "sim", "progress", "status", "android",
-            "android_devices", "browse"]
+            "android_devices", "browse", "json"]
+
+# The shape of the "data" object that status, lock, sim_list and android list
+# reply with, for `mac-sim <verb> --json`. Adding a field keeps the version;
+# renaming, removing or changing the meaning of one bumps it, and the change is
+# recorded in docs/MAC-SIM.md.
+JSON_SCHEMA_VERSION = 1
 
 # Verbs that need no project context: they describe the Mac, not a checkout.
 GLOBAL_VERBS = {"list", "booted", "runtimes", "open_simulator_ui", "browse"}
@@ -1184,24 +1190,35 @@ def sim_list(body, project, base):
     cfg = simulators_config(project)
     pname = project["name"]
     sims = read_sims(pname)
+    limit = int(cfg.get("max", 3))
+    data = {"project": pname, "max": limit, "simulators": []}
     if not sims:
-        return f"{pname}: no private simulators (max {int(cfg.get('max', 3))})", {"simulators": {}}
+        return (f"{pname}: no private simulators (max {limit})",
+                {"simulators": {}, "data": data})
     devices = simctl_devices()
-    lines = [f"{pname}: {len(sims)} of {int(cfg.get('max', 3))} private simulators"]
+    lines = [f"{pname}: {len(sims)} of {limit} private simulators"]
     for name, entry in sorted(sims.items()):
         device = devices.get(entry.get("udid"))
         if entry.get("state") != "ready":
-            state = "creating"
+            state = kind = "creating"
         elif device is None:
             state = f"GONE (deleted outside mac-sim; `mac-sim sim delete {name}` clears it)"
+            kind = "gone"
         else:
-            state = device["state"]
+            state = kind = device["state"]
         age = int(time.time() - float(entry.get("created", 0)))
+        lock = f"{pname}@{name}"
+        data["simulators"].append({
+            "name": name, "state": kind, "udid": entry.get("udid"),
+            "port": entry.get("port"),
+            "workdir": entry.get("guest_workdir") or entry.get("workdir"),
+            "created": entry.get("created"), "age": age,
+            "claim": owner_data(lock, Handler.config.lock_ttl)})
         lines.append(f"  {name:<16} {state:<10} port {entry.get('port')}  "
                      f"{entry.get('udid', '-')}  from "
                      f"{entry.get('guest_workdir') or entry.get('workdir')}, "
                      f"{age // 3600}h {age % 3600 // 60}m old")
-    return "\n".join(lines), {"simulators": sims}
+    return "\n".join(lines), {"simulators": sims, "data": data}
 
 
 def pull(body, project, base):
@@ -1306,10 +1323,11 @@ def status(body, project, base):
         lines.append(f"  log: {executing['log']}")
 
     port = sim["port"] if sim else defaults.get("port")
-    serving = None
+    serving = bundler = None
     if port:
         serving, line = describe_bundler(name, port)
         lines.append(line)
+        bundler = bundler_data(name, port, serving)
 
     bundle = defaults.get("bundle_id")
     running = None
@@ -1324,7 +1342,17 @@ def status(body, project, base):
         (running is False, "app not running"),
     ) if failed]
     lines.append("ready: " + ("yes" if not blockers else "no (" + ", ".join(blockers) + ")"))
-    return "\n".join(lines), {"ready": not blockers}
+    data = {
+        "platform": "ios", "project": project["name"], "lock": name,
+        "ready": not blockers, "blockers": blockers,
+        "device": {"name": device["name"], "udid": udid, "state": device["state"],
+                   "booted": booted, "sim": sim["name"] if sim else None},
+        "claim": owner_data(name, Handler.config.lock_ttl),
+        "executing": executing_data(executing),
+        "bundler": bundler,
+        "app": None if not bundle else {"bundle_id": bundle, "running": bool(running)},
+    }
+    return "\n".join(lines), {"ready": not blockers, "data": data}
 
 
 def describe_bundler(name, port):
@@ -1343,6 +1371,19 @@ def describe_bundler(name, port):
         return serving, (f"bundler: something is listening on {port}, not started "
                          f"through mac-sim, so its build profile is unknown")
     return serving, f"bundler: nothing listening on {port}"
+
+
+def bundler_data(name, port, serving):
+    """The bundler line as data. `variant` is null both for the default profile
+    and when the profile is unknown; `started_by_mac_sim` tells them apart."""
+    server = read_server(name) if serving else None
+    data = {"port": port, "serving": bool(serving), "started_by_mac_sim": bool(server),
+            "command": None, "variant": None, "workdir": None, "started": None}
+    if server:
+        data.update({"command": server.get("command"), "variant": server.get("variant"),
+                     "workdir": server.get("guest_workdir") or server.get("workdir"),
+                     "started": server.get("at")})
+    return data
 
 
 DIRECT = {"sim_create": sim_create, "sim_delete": sim_delete,
@@ -1525,11 +1566,29 @@ def android_list(body, project, base):
     cfg = android_config(project, body)
     avds = run_host([str(cfg["sdk"] / "emulator" / "emulator"), "-list-avds"], 60)
     devices = run_host([str(cfg["sdk"] / "platform-tools" / "adb"), "devices", "-l"], 30)
+    attached = []
+    # `adb devices -l`: a header, then "<serial> <state> key:value ...".
+    for line in devices.splitlines()[1:]:
+        serial, _, rest = line.strip().partition(" ")
+        if not serial or serial.startswith("*"):
+            continue
+        state, *props = rest.split()
+        attached.append({"serial": serial, "state": state,
+                         **{k: v for k, _, v in (p.partition(":") for p in props) if v}})
+    data = {
+        "project": project["name"], "package": cfg["package"], "default": cfg["default"],
+        "emulators": [
+            {"name": n, "avd": d["avd"], "serial": d["serial"], "port": d.get("port"),
+             "default": n == cfg["default"]}
+            for n, d in sorted(cfg["devices"].items())],
+        "avds": [a.strip() for a in avds.splitlines() if a.strip()],
+        "attached": attached,
+    }
     return (f"project emulators: " + ", ".join(
                 f"{n} = {d['avd']} as {d['serial']}" for n, d in cfg["devices"].items())
             + f"\n"
             f"AVDs:\n" + "\n".join(f"  {a}" for a in avds.splitlines() if a.strip())
-            + f"\n{devices}"), {}
+            + f"\n{devices}"), {"data": data}
 
 
 def android_screenshot(body, project, base):
@@ -1595,10 +1654,11 @@ def android_status(body, project, base):
         debuggable = installed and "DEBUGGABLE" in flags
         running = installed and android_pid(adb, cfg["package"]) is not None
 
-    serving = None
+    serving = bundler = None
     if cfg["port"]:
         serving, line = describe_bundler(name, cfg["port"])
         lines.append(line)
+        bundler = bundler_data(name, cfg["port"], serving)
 
     if installed is None:
         lines.append(f"app: {cfg['package']} unknown (emulator not booted)")
@@ -1616,7 +1676,18 @@ def android_status(body, project, base):
         (installed and not running, "app not running"),
     ) if failed]
     lines.append("ready: " + ("yes" if not blockers else "no (" + ", ".join(blockers) + ")"))
-    return "\n".join(lines), {"ready": not blockers}
+    data = {
+        "platform": "android", "project": project["name"], "lock": name,
+        "ready": not blockers, "blockers": blockers,
+        "device": {"name": cfg["name"], "avd": cfg["avd"], "serial": cfg["serial"],
+                   "state": state or None, "booted": booted},
+        "claim": owner_data(name, Handler.config.lock_ttl),
+        "executing": executing_data(executing),
+        "bundler": bundler,
+        "app": {"package": cfg["package"], "installed": installed,
+                "running": running, "debuggable": debuggable},
+    }
+    return "\n".join(lines), {"ready": not blockers, "data": data}
 
 
 ANDROID_DIRECT_FNS = {"list": android_list, "screenshot": android_screenshot,
@@ -1740,6 +1811,27 @@ def _executing_info(name):
             "workdir": claim.guest_workdir or claim.workdir,
             "log": claim.log,
             "elapsed": time.time() - (claim.started or time.time())}
+
+
+def owner_data(name, ttl):
+    """The sticky owner record as data, or None when nobody holds the claim."""
+    owner = read_owner(name)
+    if not owner:
+        return None
+    age = int(time.time() - float(owner.get("at", 0)))
+    return {"workdir": owner.get("guest_workdir") or owner.get("workdir"),
+            "verb": owner.get("verb"), "at": owner.get("at"), "age": age,
+            "expired": age >= ttl}
+
+
+def with_schema(data):
+    return {"schemaVersion": JSON_SCHEMA_VERSION, **data}
+
+
+def executing_data(executing):
+    if executing is None:
+        return None
+    return {**executing, "elapsed": int(executing["elapsed"])}
 
 
 def kill_active(name, grace=3.0, expected_pid=None):
@@ -1899,6 +1991,7 @@ class Handler(BaseHTTPRequestHandler):
             "ok": True,
             "verbs": BUILTIN_VERBS,
             "features": FEATURES,
+            "schemaVersion": JSON_SCHEMA_VERSION,
             "lock_ttl": self.config.lock_ttl,
             "projects": {
                 name: {
@@ -2002,6 +2095,8 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 stdout, extra = DIRECT[verb](body, project, base)
             done = True
+            if "data" in extra:
+                extra["data"] = with_schema(extra["data"])
             log(f"DONE {verb}: exit=0")
             return self._reply(200, {"verb": verb, "exit_code": 0,
                                      "stdout": stdout, "stderr": "", **extra})
@@ -2048,6 +2143,11 @@ class Handler(BaseHTTPRequestHandler):
                    if killed and killed.get("pid") else
                    " (nothing was executing)" if action == "reset" else ""))
             msg = f"{name}: simulator released"
+            data = {"lock": name, "action": action, "stopped": None}
+            if action == "reset" and killed:
+                data["stopped"] = {"verb": killed["verb"], "pid": killed.get("pid"),
+                                   "elapsed": int(killed["elapsed"]),
+                                   "workdir": killed.get("guest_workdir") or killed.get("workdir")}
             if action == "reset":
                 if killed:
                     elapsed = int(killed["elapsed"])
@@ -2058,10 +2158,13 @@ class Handler(BaseHTTPRequestHandler):
                 else:
                     msg += "\n  nothing was executing; only the ownership claim was cleared"
             return self._reply(200, {"verb": "lock", "exit_code": 0,
-                                     "stdout": msg, "stderr": ""})
+                                     "stdout": msg, "stderr": "", "data": with_schema(data)})
         return self._reply(200, {"verb": "lock", "exit_code": 0,
                                  "stdout": describe_owner(name, self.config.lock_ttl),
-                                 "stderr": ""})
+                                 "stderr": "", "data": with_schema({
+                                     "lock": name, "action": None,
+                                     "claim": owner_data(name, self.config.lock_ttl),
+                                     "executing": executing_data(_executing_info(name))})})
 
     def _client_gone(self):
         """Whether the guest closed its connection (a killed `mac-sim` call). The guest

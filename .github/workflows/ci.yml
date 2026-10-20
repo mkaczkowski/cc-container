@@ -16,7 +16,7 @@ jobs:
           shellcheck -s bash -S warning bin/cc-container.sh install.sh guest/statusline.sh
 
       - name: Python
-        run: python3 -m py_compile guest/cc-mcp-sync guest/cc-subscription-guard guest/pi-config-sync
+        run: python3 -m py_compile guest/cc-mcp-sync guest/cc-subscription-guard guest/pi-config-sync guest/mac-sim host/mac-sim-shim.py
 
       - name: JSON
         run: |

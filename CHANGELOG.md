@@ -12,6 +12,13 @@
   subscription-only, with the mac-sim bridge and nothing else of yours
   mounted, sized for about four sessions. README "Profiles" covers its own
   login on its own home volume.
+- **`--json` for the mac-sim verbs scripts read.** `status`, `lock`
+  (`release`, `reset`), `sim list`, `commands` and the new alias `projects`, and
+  `android status|list|lock` print one JSON object with a `schemaVersion` (1)
+  instead of text, so a tool such as a task runner reads a versioned contract
+  rather than scraping lines. Exit codes are unchanged. The fields are in
+  `docs/MAC-SIM.md` ("JSON output for scripts"). Needs a shim restart
+  (`cc-sim-down && cc-sim-up`); an older shim is refused with that hint.
 - **Free-disk guard.** `ccup`, `ccrun`, `pirun`, `ccsh`, a profile's `up` and
   `run`, and `cc-container-build` refuse to start with less than
   `CC_DISK_MIN_GB` (default 10) free on the Mac, naming `container system df`

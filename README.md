@@ -753,6 +753,10 @@ checkout you call from**, git worktrees included, and a checkout claims the
 simulator while it uses it, so two sessions cannot silently overwrite each
 other's build.
 
+A script that reads the answers passes `--json` (`mac-sim status --json`,
+`sim list`, `lock`, `projects`, `android status|list|lock`) and gets one
+versioned JSON object instead of text.
+
 The same bridge drives **Android emulators** on the Mac (`mac-sim android
 [-d tablet] boot | install | screenshot | ...`) for a project whose config declares an
 `android` block: the emulator needs a hypervisor the guest does not have.

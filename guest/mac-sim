@@ -30,7 +30,8 @@ Built-in simulator verbs work for any project:
 
 Project commands come from the host config (`mac-sim commands` lists them):
 
-  mac-sim commands                      # what this project declares
+  mac-sim commands                      # what this project declares (also:
+                                         # `mac-sim projects`)
   mac-sim run                           # e.g. a declared "run" command
   mac-sim run --profile e2e             # ...in its "e2e" variant
   mac-sim metro start --profile e2e     # `<cmd> start` is the command itself
@@ -87,6 +88,11 @@ the Mac, under a claim of its own (it never contends with the iOS simulator):
   mac-sim android run --profile e2e     # any other word is the declared
                                          # "android-run" project command
   mac-sim android -d tablet boot        # another emulator the project declares
+
+For a script, --json makes `status`, `lock` (and `release`/`reset`), `sim list`,
+`commands`/`projects`, `android status|list|lock` print one JSON object with a
+"schemaVersion" instead of text (docs/MAC-SIM.md describes it). Exit codes do not
+change: `status --json` still exits 0 only when the app is ready.
 """
 
 import argparse
@@ -106,8 +112,8 @@ ANDROID_DEVICE = os.environ.get("MAC_SIM_ANDROID_DEVICE")
 
 BUILTINS = {"list", "booted", "runtimes", "boot", "shutdown", "gui", "install",
             "launch", "terminate", "uninstall", "openurl", "appearance", "screenshot", "logs",
-            "build", "commands", "lock", "release", "reset", "sim", "pull", "status",
-            "android", "browse"}
+            "build", "commands", "projects", "lock", "release", "reset", "sim", "pull",
+            "status", "android", "browse"}
 
 # `mac-sim android <verb>`: built in. Any other word after `android` is the
 # project command `android-<word>`.
@@ -347,6 +353,26 @@ def emit(result, quiet_stdout=False, exit_on_failure=True):
         sys.exit(f"mac-sim: {result.get('verb')} failed on the host "
                  f"(exit {code}); see output above")
     return result
+
+
+def require_json(health=None):
+    return require_feature("json", "--json", health)
+
+
+def emit_json(result):
+    """Print the structured reply of a verb run with --json. A host failure has
+    no data: its message goes to stderr and stdout stays empty, so a parser
+    never reads half an answer."""
+    if result.get("exit_code", 0) != 0 or "data" not in result:
+        emit(result, quiet_stdout=True)
+        sys.exit(f"mac-sim: the host sent no JSON for {result.get('verb')!r}")
+    print(json.dumps(result["data"], indent=2, sort_keys=True))
+    return result
+
+
+def projects_json(health):
+    return {"schemaVersion": health["schemaVersion"], "checkout": WORKDIR,
+            "lock_ttl": health.get("lock_ttl"), "projects": health.get("projects", {})}
 
 
 def pretty_devices(raw):
@@ -590,9 +616,15 @@ def android_main(sub, argv):
     elif sub == "reset":
         ap.add_argument("--pid", type=int, default=None,
                         help="only reset if this pid is still the one executing")
+    if sub in ("status", "list", "lock", "release", "reset"):
+        ap.add_argument("--json", action="store_true",
+                        help="print one JSON object instead of text")
     a = ap.parse_args(argv)
 
     health = require_feature("android", "`mac-sim android`")
+    as_json = getattr(a, "json", False)
+    if as_json:
+        require_json(health)
     scope = {"platform": "android"}
     if a.device:
         require_feature("android_devices", "`mac-sim android -d`", health)
@@ -612,11 +644,16 @@ def android_main(sub, argv):
                 payload["pid"] = a.pid
         elif sub == "release":
             payload["action"] = "release"
-        return emit(call(payload, timeout=30))
+        res = call(payload, timeout=30)
+        return emit_json(res) if as_json else emit(res)
 
     if sub == "status":
-        res = emit(call({"verb": "status", **scope}, timeout=120))
+        res = call({"verb": "status", **scope}, timeout=120)
+        res = emit_json(res) if as_json else emit(res)
         sys.exit(0 if res.get("ready") else 1)
+
+    if sub == "list" and as_json:
+        return emit_json(call({"verb": "list", **scope}))
 
     if sub == "boot":
         print("mac-sim android boot: starting the emulator; a cold boot takes a "
@@ -689,10 +726,14 @@ def main():
     def add(name):
         return sub.add_parser(name, parents=[nested])
 
-    for name in ("list", "booted", "runtimes", "boot", "shutdown", "gui",
-                 "commands", "lock", "release", "status"):
+    for name in ("list", "booted", "runtimes", "boot", "shutdown", "gui"):
         add(name)
+    for name in ("commands", "projects", "lock", "release", "status"):
+        add(name).add_argument("--json", action="store_true",
+                               help="print one JSON object instead of text")
     p = add("reset")
+    p.add_argument("--json", action="store_true",
+                   help="print one JSON object instead of text")
     p.add_argument("--pid", type=int, default=None,
                     help="only reset if this pid is still the one executing "
                          "(from `mac-sim lock`); guards against killing an "
@@ -716,7 +757,9 @@ def main():
     sp.add_argument("name", nargs="?", default=None,
                     help="default: the checkout directory's name")
     sp = sims.add_parser("delete", parents=[nested]); sp.add_argument("name")
-    sims.add_parser("list", parents=[nested])
+    sp = sims.add_parser("list", parents=[nested])
+    sp.add_argument("--json", action="store_true",
+                    help="print one JSON object instead of text")
     p = add("openurl"); p.add_argument("url")
     p = add("browse"); p.add_argument("url", help="an https:// URL under a prefix the host allows")
     p = add("appearance"); p.add_argument("mode", nargs="?", choices=["light", "dark"])
@@ -828,13 +871,23 @@ def main():
         if a.sim_cmd == "create":
             print(f"mac-sim sim create {payload['name']}: creating and booting a "
                   f"simulator, about a minute", file=sys.stderr)
+        if getattr(a, "json", False):
+            require_json()
+            return emit_json(call(payload))
         return emit(call(payload))
 
     scope = scope_of(a)
+    as_json = getattr(a, "json", False)
+    health = None
     if "sim" in scope:
-        require_feature("sim", "--sim")
+        health = require_feature("sim", "--sim")
+    if as_json:
+        health = require_json(health)
 
-    if a.cmd == "commands":
+    if a.cmd in ("commands", "projects"):
+        if as_json:
+            print(json.dumps(projects_json(health), indent=2, sort_keys=True))
+            return
         return print_commands(request("GET", timeout=30))
 
     if a.cmd in ("lock", "release", "reset"):
@@ -845,10 +898,12 @@ def main():
                 payload["pid"] = a.pid
         elif a.cmd == "release":
             payload["action"] = "release"
-        return emit(call(payload, timeout=30))
+        res = call(payload, timeout=30)
+        return emit_json(res) if as_json else emit(res)
 
     if a.cmd == "status":
-        res = emit(call({"verb": "status", **scope}, timeout=120))
+        res = call({"verb": "status", **scope}, timeout=120)
+        res = emit_json(res) if as_json else emit(res)
         sys.exit(0 if res.get("ready") else 1)
 
     if a.cmd in ("list", "booted", "runtimes"):
