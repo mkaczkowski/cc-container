@@ -179,7 +179,7 @@ if os.environ.get("MAC_SIM_ON_HOST") == "1":
     UNREACHABLE = (
         "mac-sim: cannot reach the shim at {shim} ({reason}).\n"
         "Start it:  cc-sim-up\n"
-        "It binds the vmnet bridge address, which exists only while a container\n"
+        "It also binds the vmnet bridge address, which exists only while a container\n"
         "runs; cc-sim-up starts a small probe container to hold it when none does."
     )
 

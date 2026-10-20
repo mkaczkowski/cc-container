@@ -549,7 +549,7 @@ an agent session started on the Mac) uses the same CLI. Sourcing
 `bin/cc-container.sh` appends the repo's `host/bin` to `PATH`, and
 `host/bin/mac-sim` there runs `guest/mac-sim` with:
 
-- `MAC_SIM_SHIM` from `listen` in `mac-sim.json`, unless already set;
+- `MAC_SIM_SHIM` as `http://127.0.0.1:<listen.port>`, unless already set;
 - `MAC_SIM_TOKEN` from `~/.local/state/cc-container/mac-sim.token`, the token
   every container gets, unless already set.
 
@@ -566,11 +566,14 @@ build. Paths are the Mac's, which are also the guest's (projects are mounted at
 their host path). A process started outside such a shell (launchd, an IDE run
 configuration) needs `host/bin` on its `PATH`, or the full path to the script.
 
-The shim must be running. It binds the bridge address (`listen.host`), which
-exists only while some container runs, so on a Mac with no container up
-`cc-sim-up` starts a small probe container to hold it; `cc-sim-down` stops
-both. The Mac connects from that same address, which the default
-`listen.allow` (`192.168.64.0/24`) admits. A narrower `allow` must include it.
+The shim must be running. Besides the bridge address (`listen.host`) it
+listens on `127.0.0.1` on the same port, and the Mac-side CLI connects there:
+a VPN that routes `192.168.64.0/24` into its tunnel catches the Mac's own
+connections to the bridge address and they time out, while loopback is never
+routed. Loopback callers still need the token; `listen.allow` does not apply
+to them. The bridge address exists only while some container runs, so on a
+Mac with no container up `cc-sim-up` starts a small probe container to hold
+it; `cc-sim-down` stops both.
 
 This adds nothing to what the guest can reach: the CLI only makes requests to
 the shim, with a token that was already in a file on the Mac.

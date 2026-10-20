@@ -20,12 +20,13 @@ if [ ! -r "${config}" ]; then
   echo "mac-sim: no config at ${config}; see ${repo}/docs/MAC-SIM.md" >&2
   exit 1
 fi
+# Loopback, not listen.host: the shim listens on both, and a VPN that routes
+# the bridge subnet into its tunnel swallows the Mac's own connections to the
+# bridge address.
 if [ -z "${MAC_SIM_SHIM:-}" ]; then
-  host="$(jq -r '.listen.host // "192.168.64.1"' "${config}")" \
-    || { echo "mac-sim: cannot read listen.host from ${config}" >&2; exit 1; }
   port="$(jq -r '.listen.port // 8890' "${config}")" \
     || { echo "mac-sim: cannot read listen.port from ${config}" >&2; exit 1; }
-  MAC_SIM_SHIM="http://${host}:${port}"
+  MAC_SIM_SHIM="http://127.0.0.1:${port}"
 fi
 if [ -z "${MAC_SIM_TOKEN:-}" ]; then
   if [ ! -s "${token_file}" ]; then

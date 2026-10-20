@@ -2415,8 +2415,14 @@ def main():
     Handler.config = config
     Handler.token = token
     # Bind to the bridge address only, not 0.0.0.0: the client-IP allowlist is a
-    # second line of defence, not the first.
-    log(f"listening on {config.host}:{config.port}, clients={config.clients}")
+    # second line of defence, not the first. Loopback is for host/bin/mac-sim on
+    # the Mac itself: a VPN that routes 192.168.64.0/24 into its tunnel swallows
+    # the Mac's own connections to the bridge address, but never loopback ones.
+    # Both are bound before serving so either bind failing stops the shim.
+    bridge = ThreadingHTTPServer((config.host, config.port), Handler)
+    loopback = ThreadingHTTPServer(("127.0.0.1", config.port), Handler)
+    log(f"listening on {config.host}:{config.port} and 127.0.0.1:{config.port}, "
+        f"clients={config.clients}")
     for name, project in config.projects.items():
         log(f"  project {name}: {project['root']} "
             f"[{', '.join(sorted(project['commands'])) or 'no project commands'}]")
@@ -2425,7 +2431,8 @@ def main():
             for dname, device in android["devices"].items():
                 log(f"    android {dname}: {device['avd']} as {device['serial']}"
                     f"{' (default)' if dname == android['default'] else ''}")
-    ThreadingHTTPServer((config.host, config.port), Handler).serve_forever()
+    threading.Thread(target=loopback.serve_forever, daemon=True).start()
+    bridge.serve_forever()
 
 
 if __name__ == "__main__":

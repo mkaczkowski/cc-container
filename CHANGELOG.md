@@ -6,8 +6,9 @@
   to `PATH`, and `host/bin/mac-sim` runs the guest CLI against the shim with
   the containers' token. A tool on the Mac (a task runner, a local agent
   session) then drives the simulators under the same claims as the sessions in
-  containers. Needs a running shim (`cc-sim-up`). See `docs/MAC-SIM.md`,
-  "Running mac-sim on the Mac".
+  containers. Needs a running shim (`cc-sim-up`), which now also listens on
+  `127.0.0.1` so the Mac-side CLI still connects when a VPN routes the bridge
+  subnet into its tunnel. See `docs/MAC-SIM.md`, "Running mac-sim on the Mac".
 - `config/profile.runner.example.sh`: a profile for an agent runner,
   subscription-only, with the mac-sim bridge and nothing else of yours
   mounted, sized for about four sessions. README "Profiles" covers its own
