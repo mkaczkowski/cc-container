@@ -168,6 +168,14 @@ UNREACHABLE = (
     "It starts automatically for directories inside a project root declared in\n"
     "~/.config/cc-container/mac-sim.json; this workspace may be outside them."
 )
+# host/bin/mac-sim runs this same file on the Mac, where the shim can be started.
+if os.environ.get("MAC_SIM_ON_HOST") == "1":
+    UNREACHABLE = (
+        "mac-sim: cannot reach the shim at {shim} ({reason}).\n"
+        "Start it:  cc-sim-up\n"
+        "It binds the vmnet bridge address, which exists only while a container\n"
+        "runs; cc-sim-up starts a small probe container to hold it when none does."
+    )
 
 
 def request(method, payload=None, timeout=3700):

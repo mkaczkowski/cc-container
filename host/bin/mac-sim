@@ -1,0 +1,39 @@
+#!/bin/sh
+# mac-sim on the Mac itself: the guest CLI (guest/mac-sim), pointed at the shim
+# with the token the containers get. For a tool that runs on the Mac rather
+# than in a container (a task runner, a local agent session) and drives the
+# same simulators under the same claims.
+#
+# Sourcing bin/cc-container.sh puts this directory on PATH. Paths are the
+# Mac's own, which is what a session sees too: projects are mounted at their
+# host path. See docs/MAC-SIM.md, "Running mac-sim on the Mac".
+set -eu
+
+here="$(cd "$(dirname "$0")" && pwd)"
+repo="$(cd "${here}/../.." && pwd)"
+config_dir="${CC_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/cc-container}"
+state_dir="${CC_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/cc-container}"
+config="${CC_SIM_CONFIG:-${config_dir}/mac-sim.json}"
+token_file="${CC_SIM_TOKEN_FILE:-${state_dir}/mac-sim.token}"
+
+if [ ! -r "${config}" ]; then
+  echo "mac-sim: no config at ${config}; see ${repo}/docs/MAC-SIM.md" >&2
+  exit 1
+fi
+if [ -z "${MAC_SIM_SHIM:-}" ]; then
+  host="$(jq -r '.listen.host // "192.168.64.1"' "${config}")" \
+    || { echo "mac-sim: cannot read listen.host from ${config}" >&2; exit 1; }
+  port="$(jq -r '.listen.port // 8890' "${config}")" \
+    || { echo "mac-sim: cannot read listen.port from ${config}" >&2; exit 1; }
+  MAC_SIM_SHIM="http://${host}:${port}"
+fi
+if [ -z "${MAC_SIM_TOKEN:-}" ]; then
+  if [ ! -s "${token_file}" ]; then
+    echo "mac-sim: no token at ${token_file}; the shim has never been started. Run: cc-sim-up" >&2
+    exit 1
+  fi
+  MAC_SIM_TOKEN="$(cat "${token_file}")"
+fi
+MAC_SIM_ON_HOST=1
+export MAC_SIM_SHIM MAC_SIM_TOKEN MAC_SIM_ON_HOST
+exec python3 "${repo}/guest/mac-sim" "$@"

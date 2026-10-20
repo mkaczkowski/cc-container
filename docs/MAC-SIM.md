@@ -454,6 +454,39 @@ The bundler line is the only way to learn which build profile a running bundler
 carries: its flags are inlined when it starts and it cannot report them. A
 bundler started outside mac-sim is reported as such, with its profile unknown.
 
+## Running mac-sim on the Mac
+
+A tool that runs on the Mac rather than in a container (a task runner's driver,
+an agent session started on the Mac) uses the same CLI. Sourcing
+`bin/cc-container.sh` appends the repo's `host/bin` to `PATH`, and
+`host/bin/mac-sim` there runs `guest/mac-sim` with:
+
+- `MAC_SIM_SHIM` from `listen` in `mac-sim.json`, unless already set;
+- `MAC_SIM_TOKEN` from `~/.local/state/cc-container/mac-sim.token`, the token
+  every container gets, unless already set.
+
+```bash
+cd ~/dev/my-app            # a checkout under a declared root
+mac-sim status
+mac-sim sim list --json
+```
+
+Everything behaves as in a container: the checkout you call from is the one
+acted on, and the claims are the same ones, so a Mac-side caller and a session
+in a container queue on one simulator rather than overwriting each other's
+build. Paths are the Mac's, which are also the guest's (projects are mounted at
+their host path). A process started outside such a shell (launchd, an IDE run
+configuration) needs `host/bin` on its `PATH`, or the full path to the script.
+
+The shim must be running. It binds the bridge address (`listen.host`), which
+exists only while some container runs, so on a Mac with no container up
+`cc-sim-up` starts a small probe container to hold it; `cc-sim-down` stops
+both. The Mac connects from that same address, which the default
+`listen.allow` (`192.168.64.0/24`) admits. A narrower `allow` must include it.
+
+This adds nothing to what the guest can reach: the CLI only makes requests to
+the shim, with a token that was already in a file on the Mac.
+
 ## Lifecycle: nothing to run by hand
 
 `ccup` and `ccrun`/`pirun`/`ccsh` start the shim automatically **when the directory you

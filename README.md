@@ -528,6 +528,27 @@ How it works:
 Anything a profile adds to `CC_EXTRA_RUN_ARGS` (`--cap-add`, a published port)
 widens that container's boundary; read [SECURITY.md](SECURITY.md) first.
 
+### A profile for an agent runner
+
+A task runner that starts several unattended Claude Code sessions and checks
+their work on the simulator wants the isolation above, but it also needs the
+mac-sim bridge, and it must never bill an API key. `config/profile.runner.example.sh`
+is that profile: subscription-only, no extra mounts, MCP servers or pi config,
+`CC_SIM_AUTO=1`, and sized for about four sessions.
+
+```bash
+cp config/profile.runner.example.sh ~/.config/cc-container/profiles/runner.sh
+cd ~/dev/my-app                       # inside a root mac-sim.json declares
+cc-profile runner up                  # beside cc-session, on its own volume
+cc-profile runner attach              # once: /login, stored on runner-home
+cc-profile runner exec mac-sim status # the bridge, from the runner
+```
+
+The login is the profile's own: `/login` in `cc-profile runner attach` stores
+it on the runner's home volume, separately from `cc-home`, so logging out of
+one never signs out the other. With `CC_SUBSCRIPTION_ONLY=1` only a Claude.ai
+login works there.
+
 ## Configuration
 
 Everything user-specific lives outside the repo, mostly in
@@ -543,7 +564,7 @@ the files every setup needs. The rest are opt-in, and you create them yourself.
 | `pi/` | no | Global pi config ([Running pi](#running-pi-beside-claude-code)); mounted only if it exists when a container starts |
 | `mac-sim.json` | no | The opt-in Xcode (and Android emulator) bridge, from `config/mac-sim.example.json` ([Driving the Mac's Xcode toolchain](#driving-the-macs-xcode-toolchain-from-the-guest)) |
 | `Dockerfile.local` | no | Your own layer on top of the image ([Adding tools](#adding-tools-to-the-image)) |
-| `profiles/<name>.sh` | no | A second container's settings, from `config/profile.example.sh` ([Profiles](#profiles-a-second-isolated-container)) |
+| `profiles/<name>.sh` | no | A second container's settings, from `config/profile.example.sh` or `config/profile.runner.example.sh` ([Profiles](#profiles-a-second-isolated-container)) |
 
 Nothing else in that directory is read automatically. A directory of your own
 guest tools needs a `CC_EXTRA_VOLUME_ARGS` entry in `config.sh` (see
@@ -735,6 +756,12 @@ other's build.
 The same bridge drives **Android emulators** on the Mac (`mac-sim android
 [-d tablet] boot | install | screenshot | ...`) for a project whose config declares an
 `android` block: the emulator needs a hypervisor the guest does not have.
+
+`mac-sim` also works **on the Mac itself**, for a tool that runs there rather
+than in a container (a task runner, a local agent session): sourcing
+`bin/cc-container.sh` puts `host/bin/mac-sim` on `PATH`, which runs the same CLI
+against the shim with the containers' token, under the same claims
+([details](docs/MAC-SIM.md#running-mac-sim-on-the-mac)).
 
 Read [docs/MAC-SIM.md](docs/MAC-SIM.md) for the config format and
 [SECURITY.md](SECURITY.md) for what this widens: it is a host escape hatch by
