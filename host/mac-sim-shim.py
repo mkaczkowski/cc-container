@@ -23,6 +23,11 @@ watch_boot, watch_install, ...): the Apple Watch app is built by target for the
 watch simulator and driven on the watch paired with the iPhone simulator the
 request targets, under that simulator's own claim.
 
+A project that declares a `device` block can also install, launch, terminate and
+pull a file from one physical iPhone (device_* verbs, `xcrun devicectl`): the
+config names the single device and bundle id they may touch, and `pull` is
+limited to one directory of the app's data container.
+
 A request carrying "platform": "android" is served from the project's `android`
 block instead: the same verbs (boot, install, screenshot, logs, ...) mapped onto
 the Android SDK's `emulator` and `adb`, under a claim of their own, so an
@@ -114,6 +119,17 @@ LOCALE_RE = re.compile(r"^[A-Za-z]{2,3}([_-][A-Za-z0-9]{2,8}){0,2}$")
 EXECUTABLE_RE = re.compile(r"^[A-Za-z0-9._ -]{1,64}$")
 AVD_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 
+DEVICE_VERBS = {"device_list", "device_install", "device_launch", "device_terminate",
+                "device_pull"}
+# The device identifier devicectl is handed: a UDID, ECID, serial or CoreDevice
+# UUID from the host config, never a name, and never something an option parser
+# could read as a flag.
+DEVICE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{7,63}$")
+# What `device_pull` may read: a relative path of plain segments in the app's
+# data container, under the configured prefix.
+DEVICE_PULL_RE = re.compile(r"^[A-Za-z0-9._ -]+(/[A-Za-z0-9._ -]+)*$")
+DEFAULT_DEVICE_PULL_PREFIX = "Library/Diagnostics/"
+
 WATCH_VERBS = {"watch_build", "watch_boot", "watch_install", "watch_launch",
                "watch_terminate", "watch_screenshot", "watch_logs"}
 
@@ -122,7 +138,7 @@ BUILTIN_VERBS = [
     "install", "uninstall", "launch", "terminate", "screenshot", "openurl",
     "appearance", "logs", "xcodebuild", "project_command", "lock",
     "sim_create", "sim_delete", "sim_list", "pull", "status", "browse",
-] + sorted(WATCH_VERBS)
+] + sorted(WATCH_VERBS) + sorted(DEVICE_VERBS)
 
 # Where `watch_build` puts its products, relative to the checkout.
 WATCH_BUILD_DIR = ".mac-sim-build/watch"
@@ -138,7 +154,7 @@ DIRECT_VERBS = {"sim_create", "sim_delete", "sim_list", "pull", "status"}
 # simulator" into "act on the shared one". The guest checks this list before
 # sending such a field, so a stale shim is reported instead of obeyed wrongly.
 FEATURES = ["appearance", "locale", "pull", "sim", "progress", "status", "android",
-            "android_devices", "browse", "json", "watch"]
+            "android_devices", "browse", "json", "watch", "device"]
 
 # The shape of the "data" object that status, lock, sim_list and android list
 # reply with, for `mac-sim <verb> --json`. Adding a field keeps the version;
@@ -147,7 +163,7 @@ FEATURES = ["appearance", "locale", "pull", "sim", "progress", "status", "androi
 JSON_SCHEMA_VERSION = 1
 
 # Verbs that need no project context: they describe the Mac, not a checkout.
-GLOBAL_VERBS = {"list", "booted", "runtimes", "open_simulator_ui", "browse"}
+GLOBAL_VERBS = {"list", "booted", "runtimes", "open_simulator_ui", "browse", "device_list"}
 
 # Verbs that mutate what the simulator is running, so two checkouts doing them
 # concurrently produce nonsense. Read-only observation (screenshot, logs) is
@@ -155,7 +171,8 @@ GLOBAL_VERBS = {"list", "booted", "runtimes", "open_simulator_ui", "browse"}
 EXCLUSIVE_BUILTINS = {"boot", "shutdown", "install", "uninstall", "launch",
                       "terminate", "openurl", "appearance", "xcodebuild",
                       "watch_build", "watch_boot", "watch_install", "watch_launch",
-                      "watch_terminate"}
+                      "watch_terminate", "device_install", "device_launch",
+                      "device_terminate"}
 
 # What a "platform": "android" request may ask for. The direct ones are several
 # adb steps (or binary output) behind one request; none of them changes state.
@@ -236,6 +253,8 @@ class Config:
             if entry.get("watch") is not None:
                 entry["watch"] = parse_watch(name, entry["watch"], entry["commands"])
             check_watch_commands(name, entry.get("watch"), entry["commands"])
+            if entry.get("device") is not None:
+                entry["device"] = parse_device(name, entry["device"], entry["defaults"])
             self.projects[name] = entry
         if not self.projects:
             raise ValueError("config declares no projects")
@@ -363,6 +382,30 @@ def parse_watch(name, raw, commands):
                              f"declare \"watch_stamp\": \"write\", or the stamp never "
                              f"changes and every run would regenerate")
     return raw
+
+
+def parse_device(name, raw, defaults):
+    """Validate a project's `device` block once, at startup."""
+    if not isinstance(raw, dict):
+        raise ValueError(f"project {name}: 'device' must be an object")
+    unknown = set(raw) - {"id", "bundle_id", "pull_prefix"}
+    if unknown:
+        raise ValueError(f"project {name}: unknown device keys {sorted(unknown)}; "
+                         f"expected a subset of ['bundle_id', 'id', 'pull_prefix']")
+    if not (isinstance(raw.get("id"), str) and DEVICE_ID_RE.match(raw["id"])):
+        raise ValueError(f"project {name}: device.id must be the device's UDID, ECID, "
+                         f"serial or CoreDevice UUID (`mac-sim device list` shows them), "
+                         f"got {raw.get('id')!r}")
+    bundle = raw.get("bundle_id", defaults.get("bundle_id"))
+    if not (isinstance(bundle, str) and BUNDLE_RE.match(bundle)):
+        raise ValueError(f"project {name}: device.bundle_id (or defaults.bundle_id) "
+                         f"is required and must be a bundle id, got {bundle!r}")
+    prefix = raw.get("pull_prefix", DEFAULT_DEVICE_PULL_PREFIX)
+    if not (isinstance(prefix, str) and prefix.endswith("/")
+            and DEVICE_PULL_RE.match(prefix.rstrip("/")) and ".." not in prefix.split("/")):
+        raise ValueError(f"project {name}: device.pull_prefix must be a relative "
+                         f"directory ending in '/', got {prefix!r}")
+    return {"id": raw["id"], "bundle_id": bundle, "pull_prefix": prefix}
 
 
 def check_watch_commands(name, watch, commands):
@@ -716,7 +759,7 @@ def project_command(body, project, base, sim=None):
     # The config decides a command's platform, never the caller: it picks the
     # claim, the device and the bundler port the command runs against.
     platform = spec.get("platform", "ios")
-    if platform not in ("ios", "android"):
+    if platform not in ("ios", "android", "device"):
         raise Rejected(f"command {name!r} declares an unknown platform {platform!r}")
     if body.get("platform") not in (None, platform):
         raise Rejected(f"command {name!r} is an {platform} command; "
@@ -724,6 +767,12 @@ def project_command(body, project, base, sim=None):
     android = android_config(project, body) if platform == "android" else None
     if android and sim:
         raise Rejected(f"command {name!r} runs on the Android emulator; drop --sim")
+    device = device_config(project) if platform == "device" else None
+    if device and sim:
+        raise Rejected(f"command {name!r} runs on the physical device; drop --sim")
+    if device and spec.get("ready_app"):
+        raise Rejected(f"command {name!r}: ready_app watches a simulator; a device "
+                       f"command is done when it exits")
 
     defaults = project["defaults"]
     values = {
@@ -753,7 +802,10 @@ def project_command(body, project, base, sim=None):
     # simctl call and would fail on a machine with no matching simulator.
     templates = spec.get("argv", []) + [part for extra in spec.get("optional_argv", [])
                                         for part in extra.get("argv", [])]
-    if not android and any("{udid}" in part for part in templates):
+    if device:
+        values["device_id"] = device["id"]
+        values["bundle_id"] = values["bundle_id"] or device["bundle_id"]
+    if platform == "ios" and any("{udid}" in part for part in templates):
         values["udid"] = resolve_device(body, project)
 
     # Declared parameters, each validated by its own regex. Anything the caller
@@ -1029,6 +1081,9 @@ def dispatch(verb, body, project, base, sim=None):
     if verb in WATCH_VERBS:
         return watch_dispatch(verb, body, project, base, sim)
 
+    if verb in DEVICE_VERBS:
+        return device_dispatch(verb, body, project, base, sim)
+
     raise Rejected(f"unknown verb: {verb!r}")
 
 
@@ -1150,6 +1205,112 @@ def watch_dispatch(verb, body, project, base, sim=None):
 
 
 # --------------------------------------------------------------------------
+# A physical iPhone
+# --------------------------------------------------------------------------
+# One device, named in the host config, and nothing a caller can redirect: the
+# verbs take no device argument, so a guest cannot point them at another phone.
+# They hold a claim of their own (<project>@device), apart from every simulator's.
+def device_config(project):
+    cfg = project.get("device")
+    if cfg is None:
+        raise Rejected(
+            f"project {project['name']!r} declares no \"device\" block in the host "
+            f"config, so it has no physical device. See docs/MAC-SIM.md.")
+    return cfg
+
+
+def devicectl_json(argv, key):
+    """Run a devicectl query that writes JSON, and return `result[key]`. A shape
+    other than the expected one is an error that shows what came back."""
+    with tempfile.TemporaryDirectory(prefix="mac-sim-device-") as tmp:
+        out = Path(tmp) / "out.json"
+        try:
+            run_host(argv + ["--json-output", str(out)], 60)
+        except HostFailure as exc:
+            raise Rejected(f"{exc}")
+        raw = out.read_text()
+    try:
+        items = json.loads(raw)["result"][key]
+    except (ValueError, KeyError, TypeError):
+        items = None
+    if not isinstance(items, list):
+        raise Rejected(f"devicectl's answer has no result.{key} list, so this shim "
+                       f"cannot read it: {raw[:500]}")
+    return items
+
+
+def device_pid(device_id, bundle):
+    """The pid of the app's process on the device. devicectl terminates by pid and
+    lists processes by executable path, so the app's bundle path is the join."""
+    base = ["xcrun", "devicectl", "device", "info"]
+    apps = devicectl_json(base + ["apps", "--device", device_id, "--bundle-id", bundle], "apps")
+    bundles = [a for a in apps if a.get("bundleIdentifier") == bundle and a.get("url")]
+    if not bundles:
+        raise Rejected(f"{bundle} is not installed on the device, so there is nothing to "
+                       f"terminate. Install it first (`mac-sim device install`).")
+    app_url = bundles[0]["url"].rstrip("/") + "/"
+    procs = devicectl_json(base + ["processes", "--device", device_id], "runningProcesses")
+    pids = [p["processIdentifier"] for p in procs
+            if str(p.get("executable", "")).startswith(app_url)
+            and isinstance(p.get("processIdentifier"), int)]
+    if not pids:
+        raise Rejected(f"{bundle} is not running on the device.")
+    return pids[0]
+
+
+def device_dispatch(verb, body, project, base, sim=None):
+    if verb == "device_list":
+        return ["xcrun", "devicectl", "list", "devices"], 60, {}
+    cfg = device_config(project)
+    if sim:
+        raise Rejected("--sim names a simulator; it does not apply to the physical device")
+    device_id = cfg["id"]
+    bundle = field(body, "bundle_id", BUNDLE_RE, required=False, default=cfg["bundle_id"])
+    # The claim is the device's, not the shared simulator's.
+    extra = {"_platform": "device"}
+
+    if verb == "device_install":
+        app = safe_path(body.get("app"), project, base=base, must_exist=True)
+        if app.suffix != ".app":
+            raise Rejected("device install requires a .app bundle")
+        return (["xcrun", "devicectl", "device", "install", "app", "--device", device_id,
+                 str(app)], 600, {**extra, "bundle_id": app_bundle_id(app)})
+
+    if verb == "device_launch":
+        args = body.get("args", [])
+        if not isinstance(args, list) or len(args) > MAX_LAUNCH_ARGS or not all(
+                isinstance(a, str) and LAUNCH_ARG_RE.match(a) for a in args):
+            raise Rejected(f"launch args must be at most {MAX_LAUNCH_ARGS} plain tokens "
+                           f"({LAUNCH_ARG_RE.pattern}), got {args!r}")
+        return (["xcrun", "devicectl", "device", "process", "launch", "--device", device_id,
+                 "--terminate-existing", bundle] + args, 120, extra)
+
+    if verb == "device_terminate":
+        # A tool's terminate is a kill from outside, not a user swiping the app
+        # away: iOS treats the two differently (background refresh, for one).
+        pid = device_pid(device_id, bundle)
+        return (["xcrun", "devicectl", "device", "process", "terminate", "--device",
+                 device_id, "--pid", str(pid)], 120, extra)
+
+    if verb == "device_pull":
+        raw = body.get("path")
+        if not (isinstance(raw, str) and DEVICE_PULL_RE.match(raw)
+                and ".." not in raw.split("/")):
+            raise Rejected(f"invalid device path {raw!r}: plain relative segments only")
+        if not raw.startswith(cfg["pull_prefix"]) or raw == cfg["pull_prefix"]:
+            raise Rejected(f"device pull is limited to files under {cfg['pull_prefix']} "
+                           f"in the app's data container, got {raw!r}")
+        out = safe_path(body.get("out"), project, base=base)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        return (["xcrun", "devicectl", "device", "copy", "from", "--device", device_id,
+                 "--domain-type", "appDataContainer", "--domain-identifier", bundle,
+                 "--source", raw, "--destination", str(out)], 300,
+                {**extra, "path": str(out)})
+
+    raise Rejected(f"unknown device verb: {verb!r}")
+
+
+# --------------------------------------------------------------------------
 # Private simulators
 # --------------------------------------------------------------------------
 # The shared simulator serialises every checkout behind one claim. A private
@@ -1189,6 +1350,8 @@ def lock_name(project, sim=None, platform=None, body=None):
     Android emulator's is <project>@android[-<name>] (see android_config)."""
     if platform == "android":
         return android_config(project, body)["lock"]
+    if platform == "device":
+        return f"{project['name']}@device"
     return f"{project['name']}@{sim['name']}" if sim else project["name"]
 
 
@@ -2290,6 +2453,9 @@ class Handler(BaseHTTPRequestHandler):
                                     "owner": read_owner(lock), "executing": _executing_info(lock)}
                             for dname, d in p["android"]["devices"].items()
                             for lock in [android_config(p, {"android_device": dname})["lock"]]}},
+                    "device": None if p.get("device") is None else {
+                        "bundle_id": p["device"]["bundle_id"],
+                        "pull_prefix": p["device"]["pull_prefix"]},
                     "watch": None if p.get("watch") is None else {
                         "stamp": p["watch"].get("stamp"),
                         "rebuild": p["watch"].get("rebuild"),
@@ -2325,8 +2491,11 @@ class Handler(BaseHTTPRequestHandler):
                 log(f"REJECT {client}: verb={verb!r}")
                 return self._reply(400, {"error": f"verb must be one of {BUILTIN_VERBS}"})
             platform = body.get("platform")
-            if platform not in (None, "ios", "android"):
-                raise Rejected(f"unknown platform {platform!r}; expected ios or android")
+            if platform not in (None, "ios", "android", "device"):
+                raise Rejected(f"unknown platform {platform!r}; expected ios, android or device")
+            if platform == "device" and verb != "lock":
+                raise Rejected("platform 'device' applies to the lock verb only; use "
+                               "the device_* verbs")
             if platform == "android" and verb not in ANDROID_VERBS:
                 raise Rejected(f"{verb!r} is not available for android; available: "
                                f"{', '.join(sorted(ANDROID_VERBS))}")
@@ -2416,6 +2585,9 @@ class Handler(BaseHTTPRequestHandler):
         project = self.config.project(body.get("project"))
         if body.get("platform") == "android":
             name = android_config(project, body)["lock"]
+        elif body.get("platform") == "device":
+            device_config(project)
+            name = lock_name(project, platform="device")
         else:
             name = lock_name(project, resolve_sim(body, project))
         action = body.get("action")

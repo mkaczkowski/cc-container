@@ -73,6 +73,13 @@ with a threat model, not as a convenience script:
   and leaves the feature off until the config declares it. A watch created
   with `--with-watch` is recorded beside its phone and goes with it; the watch
   verbs act only on the watch paired with the simulator the call targets.
+- **A physical device is a much larger target, so name it once, on the host.**
+  `mac-sim device` can install, launch, kill and read from a real iPhone. The
+  device identifier comes from the host config only and no verb takes a device
+  argument; install takes a `.app` inside a project root; `pull` reads one
+  configured directory of one app's data container (plain path segments, no `..`)
+  and writes inside the checkout; launch arguments are plain tokens. The feature
+  is off until the config has a `device` block.
 
 Even done well, the residual risk is real: if a bridged command is something like
 `npm test`, and the agent can edit that project's `package.json`, then the agent

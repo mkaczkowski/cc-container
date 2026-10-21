@@ -761,6 +761,10 @@ A project that declares a `watch` block also builds and drives its **Apple Watch
 app on a watch paired with the iPhone simulator (`mac-sim watch build | install |
 launch | screenshot`, `mac-sim sim create <name> --with-watch`).
 
+A project that declares a `device` block can also install, launch, terminate and pull
+a diagnostics file from one physical iPhone (`mac-sim device ...`), the one its host
+config names.
+
 The same bridge drives **Android emulators** on the Mac (`mac-sim android
 [-d tablet] boot | install | screenshot | ...`) for a project whose config declares an
 `android` block: the emulator needs a hypervisor the guest does not have.

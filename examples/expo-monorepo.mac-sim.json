@@ -55,6 +55,14 @@
         "rebuild": { "command": "prebuild", "variant": "clean" }
       },
 
+      "//d": "One physical iPhone (`mac-sim device ...`). `mac-sim device list` shows",
+      "//d1": "its id. No verb takes a device argument, so this is the only phone",
+      "//d2": "a guest can touch; `pull` reads only pull_prefix of the app's data.",
+      "device": {
+        "id": "00008150-000A1B2C3D4E5F60",
+        "pull_prefix": "Library/Diagnostics/"
+      },
+
       "//a": "Android emulators (`mac-sim android [-d tablet] ...`). A fixed console",
       "//a1": "port fixes each one's adb serial (emulator-5560) and keeps it off the 5554",
       "//a2": "an emulator started by hand takes; -read-only lets both run one AVD.",
@@ -84,6 +92,18 @@
                        "--platform", "ios", "--clean"]
             }
           }
+        },
+
+        "device-run": {
+          "//": "`mac-sim device run`: a Release build, which embeds its JS, on the phone.",
+          "platform": "device",
+          "argv": ["pnpm", "--filter", "@myapp/mobile", "exec", "expo", "run:ios",
+                   "--device", "{device_id}", "--configuration", "Release"],
+          "cwd": "apps/mobile",
+          "timeout": 2400,
+          "path_prepend": ["~/.gem/ruby/4.0.0/bin"],
+          "watch_stamp": "check",
+          "watch": { "env": { "MYAPP_WATCH": "1" } }
         },
 
         "run": {

@@ -85,6 +85,18 @@ on the watch paired with the iPhone simulator, under the same claim:
   mac-sim prebuild --watch              # a command that declares "watch" takes it
                                          # (also: mac-sim run --watch --profile e2e)
 
+A project that declares a "device" block also drives the one physical iPhone it
+names, under a claim of its own (a tool kill is not a user force-quit):
+
+  mac-sim device list                   # what devicectl sees, to find the device id
+  mac-sim device run [--watch]          # the declared "device-run" command, e.g. a
+                                         # Release build installed on the phone
+  mac-sim device install path/to/App.app
+  mac-sim device launch [-- args]       # terminate | pull <path> [out] too;
+                                         # pull is limited to one directory of
+                                         # the app's data container
+  mac-sim device lock | release | reset
+
 A project that declares an "android" block also drives an Android emulator on
 the Mac, under a claim of its own (it never contends with the iOS simulator):
 
@@ -127,13 +139,18 @@ ANDROID_DEVICE = os.environ.get("MAC_SIM_ANDROID_DEVICE")
 BUILTINS = {"list", "booted", "runtimes", "boot", "shutdown", "gui", "install",
             "launch", "terminate", "uninstall", "openurl", "appearance", "screenshot", "logs",
             "build", "commands", "projects", "lock", "release", "reset", "sim", "pull",
-            "status", "android", "browse", "watch"}
+            "status", "android", "browse", "watch", "device"}
 
 # `mac-sim android <verb>`: built in. Any other word after `android` is the
 # project command `android-<word>`.
 ANDROID_BUILTINS = {"list", "boot", "shutdown", "install", "uninstall", "launch",
                     "terminate", "screenshot", "openurl", "appearance", "logs",
                     "status", "lock", "release", "reset"}
+
+# `mac-sim device <verb>`: built in. Any other word after `device` is the
+# project command `device-<word>` (`device run` is "device-run").
+DEVICE_BUILTINS = {"list", "install", "launch", "terminate", "pull", "lock", "release",
+                   "reset"}
 
 # Distinct from a general host-command failure (which exits with the shim's own
 # exit_code, normally the exact status the failing command returned). A 409
@@ -791,12 +808,15 @@ def run_project_command(name, a, commands, params, health, android_prefix, rest)
     # MAC_SIM_SIM names this checkout's private iOS simulator; an Android
     # command never runs on it, so only an explicit --sim reaches the shim
     # (which refuses it).
-    android = android_prefix or commands.get(name, {}).get("platform") == "android"
-    if android and a.sim == SIM and not any(
+    platform = commands.get(name, {}).get("platform")
+    android = android_prefix or platform == "android"
+    if (android or platform == "device") and a.sim == SIM and not any(
             arg == "--sim" or arg.startswith("--sim=") for arg in rest):
         a.sim = None
     if a.sim:
         require_feature("sim", "--sim", health)
+    if platform == "device":
+        require_feature("device", "`mac-sim device`", health)
     watch = getattr(a, "watch", False)
     if watch:
         require_feature("watch", "--watch", health)
@@ -928,6 +948,82 @@ def watch_main(a, scope):
     emit(call(payload))
 
 
+def device_main(sub, argv):
+    """`mac-sim device <verb>`: the one physical iPhone the host config names."""
+    ap = argparse.ArgumentParser(prog=f"mac-sim device {sub}")
+    ap.add_argument("-p", "--project", default=None,
+                    help="project name (only needed if several are configured)")
+    ap.add_argument("-w", "--workdir", default=WORKDIR,
+                    help="checkout to act on (default: the one you are in)")
+    ap.add_argument("-f", "--force", action="store_true",
+                    help="take the device over from another checkout")
+    if sub == "install":
+        ap.add_argument("app")
+    elif sub in ("launch", "terminate", "pull"):
+        ap.add_argument("--bundle-id", default=None)
+        if sub == "launch":
+            ap.add_argument("launch_args", nargs="*", metavar="ARG",
+                            help="handed to the app, after `--`")
+        if sub == "pull":
+            ap.add_argument("path", help="a file under the data container's pull "
+                                         "directory, e.g. Library/Diagnostics/x.json")
+            ap.add_argument("out", nargs="?", default=None,
+                            help="where to write it (default: .mac-sim/<file name>)")
+    elif sub == "reset":
+        ap.add_argument("--pid", type=int, default=None,
+                        help="only reset if this pid is still the one executing")
+    a = ap.parse_args(argv)
+
+    require_feature("device", "`mac-sim device`")
+    scope = {}
+    if a.project:
+        scope["project"] = a.project
+    if a.workdir:
+        scope["workdir"] = guest_abspath(a.workdir)
+    if a.force:
+        scope["force"] = True
+
+    if sub == "list":
+        return emit(call({"verb": "device_list"}))
+
+    if sub in ("lock", "release", "reset"):
+        payload = {"verb": "lock", "platform": "device", **scope}
+        if sub == "reset" or (sub == "release" and a.force):
+            payload["action"] = "reset"
+            if getattr(a, "pid", None):
+                payload["pid"] = a.pid
+        elif sub == "release":
+            payload["action"] = "release"
+        return emit(call(payload, timeout=30))
+
+    payload = {"verb": f"device_{sub}", **scope}
+    if getattr(a, "bundle_id", None):
+        payload["bundle_id"] = a.bundle_id
+    if sub == "install":
+        payload["app"] = guest_abspath(a.app)
+        res = emit(call(payload))
+        print(f"installed {res.get('bundle_id') or a.app} on the device")
+    elif sub == "launch":
+        launch_args = [x for i, x in enumerate(a.launch_args) if not (i == 0 and x == "--")]
+        if launch_args:
+            payload["args"] = launch_args
+        emit(call(payload))
+        print(f"launched {a.bundle_id or 'the app'} on the device"
+              + (f" with {' '.join(launch_args)}" if launch_args else ""))
+    elif sub == "terminate":
+        emit(call(payload))
+        print(f"terminated {a.bundle_id or 'the app'} on the device "
+              f"(a kill from a tool, not a user force-quit)")
+    elif sub == "pull":
+        out = guest_abspath(a.out or os.path.join(
+            a.workdir or "/workspace", ".mac-sim", os.path.basename(a.path)))
+        res = emit(call({**payload, "path": a.path, "out": out}), quiet_stdout=True)
+        if not os.path.exists(out):
+            sys.exit(f"mac-sim: the host wrote {res.get('path')} but it is not "
+                     f"visible at {out}; is that path inside the bind mount?")
+        print(f"{out} ({os.path.getsize(out)} bytes)")
+
+
 def main():
     def common_options(nested):
         """The options every command takes. A nested parser must not carry
@@ -1040,6 +1136,17 @@ def main():
     # verbs into this CLI.
     argv = sys.argv[1:]
     first, idx = first_positional(argv)
+    if first == "device":
+        rest = argv[:idx] + argv[idx + 1:]
+        sub, sidx = first_positional(rest)
+        if sub is None or sub in ("-h", "--help"):
+            sys.exit("usage: mac-sim device <" + "|".join(sorted(DEVICE_BUILTINS))
+                     + "|<declared device-* command>> ...")
+        if sub in DEVICE_BUILTINS:
+            return device_main(sub, rest[:sidx] + rest[sidx + 1:])
+        # `device run` is the declared "device-run" project command.
+        argv = rest[:sidx] + [f"device-{sub}"] + rest[sidx + 1:]
+        first, idx = f"device-{sub}", sidx
     android_prefix = first == "android"
     if android_prefix:
         rest = argv[:idx] + argv[idx + 1:]
