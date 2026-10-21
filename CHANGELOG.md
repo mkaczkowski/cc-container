@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- **`mac-sim device`: one physical iPhone.** A project that declares a `device`
+  block gets `mac-sim device list | install | launch [-- args] | terminate |
+  pull | lock | release | reset`, and `device run` for a declared `device-run`
+  command (`"platform": "device"`, with `{device_id}`; it takes `--watch`). The
+  verbs wrap `xcrun devicectl` for the one device the host config names, take no
+  device argument, hold a claim of their own, and `pull` is limited to
+  `Library/Diagnostics/` of the app's data container (configurable). See
+  `docs/MAC-SIM.md`, "A physical iPhone". Needs a shim restart
+  (`cc-sim-down && cc-sim-up`); an older shim is refused with that hint.
 - **`mac-sim` builds and drives an Apple Watch app.** A project that declares a
   `watch` block gets `mac-sim watch build | boot | install | launch [-- args] |
   terminate | screenshot | logs` (an `xcodebuild` by target for the watch

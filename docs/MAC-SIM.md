@@ -346,6 +346,65 @@ Run natively on the Mac, set the same environment variable yourself and keep the
 stamp in step: `MYAPP_WATCH=1 pnpm exec expo prebuild --clean`, then
 `echo watch > apps/mobile/ios/.myapp-watch` (`echo plain >` without it).
 
+## A physical iPhone
+
+A project that declares a `device` block can install, launch, terminate and read a
+diagnostics file from **one** physical iPhone, through `xcrun devicectl`. It is the
+phone behind a Release build you check by hand, which a simulator cannot stand in for.
+
+```
+mac-sim device list                              # what devicectl sees: find the id here
+mac-sim device run [--watch]                     # the project's "device-run" command
+mac-sim device install path/to/App.app
+mac-sim device launch -- -SomeFlag value         # restarts the app; args after --
+mac-sim device terminate
+mac-sim device pull Library/Diagnostics/log.json [out]
+mac-sim device lock | release | reset
+```
+
+```json
+"device": {
+  "id": "00008150-000A1B2C3D4E5F60",
+  "bundle_id": "com.example.myapp",
+  "pull_prefix": "Library/Diagnostics/"
+}
+```
+
+- **`id`** is the device's UDID, ECID, serial or CoreDevice identifier, as
+  `mac-sim device list` prints it. It is a name only the host config knows: no verb
+  takes a device argument, so a guest cannot aim them at another phone. A device
+  name is refused, since names contain spaces and can change.
+- **`bundle_id`** is what `launch`, `terminate` and `pull` act on (`defaults.bundle_id`
+  when omitted). `--bundle-id` overrides it per call.
+- **`pull_prefix`** is the one directory of the app's data container `pull` may read
+  (`Library/Diagnostics/` by default): plain relative path segments, no `..`, and
+  never the directory itself.
+- The device has **a claim of its own** (`<project>@device`), apart from every
+  simulator's, so a device run never contends with a simulator one. `--sim` does not
+  apply to it.
+- `device run` is the declared project command `device-run` (any other word after
+  `device` is `device-<word>`). Mark it `"platform": "device"` and it gets `{device_id}`
+  for its argv. Run a **Release** configuration: a dev build loads its JavaScript
+  from Metro, and a background launch with the phone locked would try to reach it.
+  It takes `--watch` and the stamp like `run` does.
+
+```json
+"device-run": {
+  "platform": "device",
+  "argv": ["pnpm", "--filter", "@myapp/mobile", "exec", "expo", "run:ios",
+           "--device", "{device_id}", "--configuration", "Release"],
+  "cwd": "apps/mobile",
+  "timeout": 2400,
+  "watch_stamp": "check",
+  "watch": { "env": { "MYAPP_WATCH": "1" } }
+}
+```
+
+`terminate` is a kill from outside, found by matching the app's bundle path against the
+device's process list: iOS does not treat it as the user swiping the app away, so it
+does not reproduce what a force-quit does to background work. The phone must be
+plugged in or on the network, unlocked, and trusted, with Developer Mode on.
+
 ## The Android emulator
 
 The Android emulator needs a hypervisor the guest does not have, so it runs on
@@ -627,7 +686,8 @@ properties as fields.
 "projects": {...}}`. `checkout` is the checkout this call acts on (null outside
 one); `projects` is the shim's `/health` description of each declared project:
 its `root`, `owner`, `executing`, `defaults`, `pull` aliases, `simulators`,
-`android` emulators, `watch` (`stamp`, `rebuild`, `bundle_id`, or null) and
+`android` emulators, `watch` (`stamp`, `rebuild`, `bundle_id`, or null), `device`
+(`bundle_id`, `pull_prefix`, or null; never its id) and
 `commands` (each with `platform`, `variants`, `params`, `watch` and
 `watch_stamp`).
 
