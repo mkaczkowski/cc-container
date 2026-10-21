@@ -715,7 +715,10 @@ cc-up() {
     echo "Restarting existing ${CC_SESSION_NAME}..."
     _cc_spin "restarting ${CC_SESSION_NAME}" container start "${CC_SESSION_NAME}" || return 1
   else
+    # --init: an init as pid 1 reaps orphans (with `sleep infinity` there, every
+    # exited background process stayed a zombie) and forwards stop's SIGTERM.
     _cc_spin "starting ${CC_SESSION_NAME}" container run -d --name "${CC_SESSION_NAME}" \
+      --init \
       --cpus "${CC_SESSION_CPUS}" \
       --memory "${CC_SESSION_MEMORY}" \
       --volume "${PWD}:${PWD}" \
