@@ -42,6 +42,19 @@
       },
 
 
+      "//w": "The Apple Watch app (`mac-sim watch ...`, `sim create --with-watch`,",
+      "//w1": "`--watch` on prebuild and run). The stamp records whether the native",
+      "//w2": "project was generated with the watch target; run regenerates it with",
+      "//w3": "`rebuild` when --watch changes. See docs/MAC-SIM.md.",
+      "watch": {
+        "device": "Apple Watch Series 11 (46mm)",
+        "project": "apps/mobile/ios/MyApp.xcodeproj",
+        "target": "MyAppWatch",
+        "bundle_id": "com.example.myapp.watchkitapp",
+        "stamp": "apps/mobile/ios/.myapp-watch",
+        "rebuild": { "command": "prebuild", "variant": "clean" }
+      },
+
       "//a": "Android emulators (`mac-sim android [-d tablet] ...`). A fixed console",
       "//a1": "port fixes each one's adb serial (emulator-5560) and keeps it off the 5554",
       "//a2": "an emulator started by hand takes; -read-only lets both run one AVD.",
@@ -58,6 +71,21 @@
       },
 
       "commands": {
+        "prebuild": {
+          "argv": ["pnpm", "--filter", "@myapp/mobile", "exec", "expo", "prebuild", "--platform", "ios"],
+          "cwd": "apps/mobile",
+          "timeout": 1800,
+          "exclusive": true,
+          "watch_stamp": "write",
+          "watch": { "env": { "MYAPP_WATCH": "1" } },
+          "variants": {
+            "clean": {
+              "argv": ["pnpm", "--filter", "@myapp/mobile", "exec", "expo", "prebuild",
+                       "--platform", "ios", "--clean"]
+            }
+          }
+        },
+
         "run": {
           "argv": ["pnpm", "--filter", "@myapp/mobile", "exec",
                    "expo", "run:ios", "--device", "{udid}", "--port", "{port}"],
@@ -72,6 +100,8 @@
           "timeout": 2400,
           "path_prepend": ["~/.gem/ruby/4.0.0/bin"],
           "env": { "SENTRY_DISABLE_AUTO_UPLOAD": "true" },
+          "watch_stamp": "check",
+          "watch": { "env": { "MYAPP_WATCH": "1" } },
           "variants": {
             "e2e": {
               "env": { "EXPO_PUBLIC_E2E": "true" }

@@ -70,7 +70,9 @@ with a threat model, not as a convenience script:
   rather than followed onto a host file.
 - **Let it destroy only what it created.** `mac-sim` can create and delete
   simulators, but deletes only those in its own registry, caps how many exist,
-  and leaves the feature off until the config declares it.
+  and leaves the feature off until the config declares it. A watch created
+  with `--with-watch` is recorded beside its phone and goes with it; the watch
+  verbs act only on the watch paired with the simulator the call targets.
 
 Even done well, the residual risk is real: if a bridged command is something like
 `npm test`, and the agent can edit that project's `package.json`, then the agent

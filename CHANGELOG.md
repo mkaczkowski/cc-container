@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- **`mac-sim` builds and drives an Apple Watch app.** A project that declares a
+  `watch` block gets `mac-sim watch build | boot | install | launch [-- args] |
+  terminate | screenshot | logs` (an `xcodebuild` by target for the watch
+  simulator, then the watch paired with the iPhone simulator, under its claim)
+  and `mac-sim sim create <name> --with-watch`, which creates, pairs and boots a
+  watch beside the private simulator (`sim delete` removes both). A command with
+  a `watch` block takes `--watch`, and a `watch_stamp` records how the native
+  project was generated so `run` regenerates it when the flag changes. See
+  `docs/MAC-SIM.md`, "The Apple Watch app". Needs a shim restart
+  (`cc-sim-down && cc-sim-up`); an older shim is refused with that hint.
 - **`mac-sim` on the Mac.** Sourcing `bin/cc-container.sh` appends `host/bin`
   to `PATH`, and `host/bin/mac-sim` runs the guest CLI against the shim with
   the containers' token. A tool on the Mac (a task runner, a local agent

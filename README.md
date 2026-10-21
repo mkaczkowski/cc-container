@@ -757,6 +757,10 @@ A script that reads the answers passes `--json` (`mac-sim status --json`,
 `sim list`, `lock`, `projects`, `android status|list|lock`) and gets one
 versioned JSON object instead of text.
 
+A project that declares a `watch` block also builds and drives its **Apple Watch**
+app on a watch paired with the iPhone simulator (`mac-sim watch build | install |
+launch | screenshot`, `mac-sim sim create <name> --with-watch`).
+
 The same bridge drives **Android emulators** on the Mac (`mac-sim android
 [-d tablet] boot | install | screenshot | ...`) for a project whose config declares an
 `android` block: the emulator needs a hypervisor the guest does not have.
