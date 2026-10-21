@@ -71,6 +71,20 @@ its own claim, so two worktrees verify at the same time:
   mac-sim sim list
   mac-sim sim delete mine               # also stops its bundler
 
+A project that declares a "watch" block also builds and drives its Apple Watch app
+on the watch paired with the iPhone simulator, under the same claim:
+
+  mac-sim sim create mine --with-watch  # a private iPhone + a paired, booted watch
+  mac-sim watch build                   # xcodebuild by target for the watch simulator
+  mac-sim watch boot | install [app.app]
+  mac-sim watch launch -- -MyFixture name   # args after -- reach the app
+  mac-sim watch terminate
+  mac-sim watch screenshot [out.png]
+  mac-sim watch logs --lines 300        # the app's own process; --all for everything
+  mac-sim --sim mine watch launch       # every watch verb takes --sim
+  mac-sim prebuild --watch              # a command that declares "watch" takes it
+                                         # (also: mac-sim run --watch --profile e2e)
+
 A project that declares an "android" block also drives an Android emulator on
 the Mac, under a claim of its own (it never contends with the iOS simulator):
 
@@ -113,7 +127,7 @@ ANDROID_DEVICE = os.environ.get("MAC_SIM_ANDROID_DEVICE")
 BUILTINS = {"list", "booted", "runtimes", "boot", "shutdown", "gui", "install",
             "launch", "terminate", "uninstall", "openurl", "appearance", "screenshot", "logs",
             "build", "commands", "projects", "lock", "release", "reset", "sim", "pull",
-            "status", "android", "browse"}
+            "status", "android", "browse", "watch"}
 
 # `mac-sim android <verb>`: built in. Any other word after `android` is the
 # project command `android-<word>`.
@@ -557,6 +571,9 @@ def command_parser(name, spec, common):
                         metavar=param.upper(), help="declared parameter")
     pc.add_argument("-q", "--quiet", action="store_true",
                     help="do not print the output as it is produced, only its end")
+    if spec.get("watch"):
+        pc.add_argument("--watch", action="store_true",
+                        help="include the Apple Watch target (combines with --profile)")
     # --profile is the variant, except where the command declares a parameter of
     # that name (a capture profile is a dataset, not a build flag).
     if "profile" not in params and variants:
@@ -695,6 +712,222 @@ def android_main(sub, argv):
         print(f"android {sub}: done")
 
 
+def watch_stamp_target(health, command, a):
+    """(the project's `watch` settings, the stamp file in this checkout) for a
+    command that declares watch_stamp."""
+    projects = health.get("projects", {})
+    if a.project:
+        candidates = [projects.get(a.project)]
+    else:
+        candidates = [p for p in projects.values() if command in p["commands"]]
+    candidates = [p for p in candidates if p and (p.get("watch") or {}).get("stamp")]
+    if len(candidates) != 1:
+        sys.exit(f"mac-sim {command}: cannot tell which project's watch stamp applies "
+                 f"({len(candidates)} candidates); pass -p <project>")
+    checkout = a.workdir or WORKDIR
+    if not checkout:
+        sys.exit(f"mac-sim {command}: no checkout to keep the watch stamp in; run it "
+                 f"from inside one or pass -w <checkout root>")
+    watch = candidates[0]["watch"]
+    return watch, os.path.join(checkout, watch["stamp"])
+
+
+def read_watch_stamp(path):
+    """"watch" or "plain". A native project nobody stamped was generated without
+    the watch target, so a missing stamp reads as "plain"."""
+    try:
+        with open(path) as fh:
+            return fh.read().strip()
+    except FileNotFoundError:
+        return "plain"
+    except OSError as exc:
+        sys.exit(f"mac-sim: cannot read the watch stamp {path}: {exc}")
+
+
+def write_watch_stamp(path, value):
+    try:
+        with open(path, "w") as fh:
+            fh.write(value + "\n")
+    except OSError as exc:
+        sys.exit(f"mac-sim: cannot write the watch stamp {path}: {exc}. The native "
+                 f"project it describes must exist, so was it generated?")
+
+
+def ensure_watch_stamp(name, a, commands, health):
+    """Before a command that builds on the generated native project: if that
+    project was generated with the other --watch setting, regenerate it first.
+    Only the project config says how (`watch.rebuild`)."""
+    watch, path = watch_stamp_target(health, name, a)
+    want = "watch" if a.watch else "plain"
+    have = read_watch_stamp(path)
+    if have == want:
+        return
+    rebuild = watch.get("rebuild")
+    if not rebuild:
+        sys.exit(f"mac-sim {name}: the native project was generated '{have}' but this "
+                 f"run is '{want}' (stamp {path}), and the project's watch config "
+                 f"declares no \"rebuild\" command. Regenerate it by hand, with "
+                 f"--watch for 'watch' or without for 'plain'.")
+    cmd = rebuild["command"]
+    print(f"mac-sim {name}: the native project was generated '{have}', this run is "
+          f"'{want}'; regenerating it with `mac-sim {cmd}"
+          f"{' --watch' if a.watch else ''}"
+          f"{' --variant ' + rebuild['variant'] if rebuild.get('variant') else ''}`",
+          file=sys.stderr)
+    regen = argparse.Namespace(
+        device=a.device, sim=a.sim, project=a.project, workdir=a.workdir, force=a.force,
+        variant=rebuild.get("variant"), arg=[], quiet=a.quiet, watch=a.watch)
+    run_project_command(cmd, regen, commands, commands[cmd].get("params", {}),
+                        health, False, [])
+    if read_watch_stamp(path) != want:
+        sys.exit(f"mac-sim {name}: `{cmd}` finished but the stamp {path} still does not "
+                 f"say '{want}'. Declare \"watch_stamp\": \"write\" on {cmd}.")
+
+
+def run_project_command(name, a, commands, params, health, android_prefix, rest):
+    """Send one declared project command and report how it went. `a` carries the
+    scope flags (device, sim, project, workdir, force), the variant, --arg and
+    the command's own parameters."""
+    # MAC_SIM_SIM names this checkout's private iOS simulator; an Android
+    # command never runs on it, so only an explicit --sim reaches the shim
+    # (which refuses it).
+    android = android_prefix or commands.get(name, {}).get("platform") == "android"
+    if android and a.sim == SIM and not any(
+            arg == "--sim" or arg.startswith("--sim=") for arg in rest):
+        a.sim = None
+    if a.sim:
+        require_feature("sim", "--sim", health)
+    watch = getattr(a, "watch", False)
+    if watch:
+        require_feature("watch", "--watch", health)
+    stamp_mode = commands.get(name, {}).get("watch_stamp")
+    if stamp_mode == "check":
+        ensure_watch_stamp(name, a, commands, health)
+    args = dict(a.arg)
+    args.update({p: v for p in params
+                 if (v := getattr(a, f"param_{p}", None)) is not None})
+    payload = {"verb": "project_command", "command": name,
+               "args": args, **scope_of(a)}
+    if a.variant:
+        payload["variant"] = a.variant
+    if watch:
+        payload["watch"] = True
+    log_stem = f"{name}@{a.sim}" if a.sim else name
+    # After `android`, -d names an emulator, not an iOS simulator.
+    android_device = payload.pop("device", None) if android_prefix else None
+    if android_device == DEVICE:  # MAC_SIM_DEVICE, the iOS default, not a choice
+        android_device = None
+    android_device = android_device or (ANDROID_DEVICE if android_prefix else None)
+    if android_device:
+        require_feature("android_devices", "`mac-sim android -d`", health)
+        payload["android_device"] = android_device
+        for project in health.get("projects", {}).values():
+            if (project.get("android") or {}).get("default") not in (None, android_device):
+                log_stem = f"{name}@{android_device}"
+    log_path = a.workdir and os.path.join(a.workdir, ".mac-sim", "logs", f"{log_stem}.log")
+    # These run for minutes; say which checkout is being built before the
+    # wait starts, so a wrong-worktree call is caught then and not after.
+    print(f"mac-sim {name}: {a.workdir or 'project root'}", file=sys.stderr)
+    result, followed = call_following(payload, log_path,
+                                      follow=bool(log_path) and not a.quiet)
+    if result.get("stdout_is_log") and a.quiet:
+        result["stdout"] = "\n".join(result["stdout"].splitlines()[-40:])
+    if result.get("log"):
+        print(f"mac-sim {name}: full output in {result['log']}", file=sys.stderr)
+    emitted = emit(result, quiet_stdout=followed and result.get("stdout_is_log", False),
+                   exit_on_failure=False)
+    # One fixed last line on stdout, success or not: an agent that backgrounds a
+    # build waits for it in the captured output. The followed log can miss the
+    # tool's own closing lines (Gradle's BUILD SUCCESSFUL), and loops waiting
+    # for those ran to their 10-minute timeout.
+    code = result.get("exit_code", 0)
+    print(f"mac-sim {name}: exit={code}", flush=True)
+    if code != 0:
+        sys.exit(f"mac-sim: {result.get('verb')} failed on the host "
+                 f"(exit {code}); see output above")
+    if stamp_mode == "write":
+        _, path = watch_stamp_target(health, name, a)
+        write_watch_stamp(path, "watch" if watch else "plain")
+    return emitted
+
+
+def watch_main(a, scope):
+    """`mac-sim watch <verb>`: the Apple Watch app on the watch paired with the
+    iPhone simulator (the shared one, or --sim's), under that simulator's claim."""
+    require_feature("watch", "`mac-sim watch`")
+    verb = f"watch_{a.watch_cmd}"
+    payload = {"verb": verb, **scope}
+    if getattr(a, "bundle_id", None):
+        payload["bundle_id"] = a.bundle_id
+
+    if a.watch_cmd == "build":
+        log_stem = f"watch-build@{a.sim}" if a.sim else "watch-build"
+        log_path = a.workdir and os.path.join(a.workdir, ".mac-sim", "logs", f"{log_stem}.log")
+        print(f"mac-sim watch build: {a.workdir or 'project root'}", file=sys.stderr)
+        result, followed = call_following(payload, log_path,
+                                          follow=bool(log_path) and not a.quiet)
+        if result.get("stdout_is_log") and a.quiet:
+            result["stdout"] = "\n".join(result["stdout"].splitlines()[-40:])
+        emit(result, quiet_stdout=followed and result.get("stdout_is_log", False),
+             exit_on_failure=False)
+        code = result.get("exit_code", 0)
+        print(f"mac-sim watch build: exit={code}", flush=True)
+        if code != 0:
+            sys.exit(f"mac-sim: watch_build failed on the host (exit {code}); "
+                     f"see output above")
+        print(f"built {result.get('app')}")
+        return
+
+    if a.watch_cmd == "boot":
+        res = call(payload)
+        # Booting an already-booted device is not an error worth failing on.
+        if res.get("exit_code") and "current state: Booted" in res.get("stderr", ""):
+            print("already booted")
+            return
+        emit(res)
+        print("booted")
+        return
+
+    if a.watch_cmd == "install":
+        if a.app:
+            payload["app"] = guest_abspath(a.app)
+        res = emit(call(payload))
+        print(f"installed {res.get('bundle_id') or a.app or 'the built watch app'}")
+        return
+
+    if a.watch_cmd == "launch":
+        # `launch -- -Flag value`: argparse leaves the separator in the list.
+        launch_args = [x for i, x in enumerate(a.launch_args) if not (i == 0 and x == "--")]
+        if launch_args:
+            payload["args"] = launch_args
+        emit(call(payload))
+        print(f"launched {a.bundle_id or 'the watch app'}"
+              + (f" with {' '.join(launch_args)}" if launch_args else ""))
+        return
+
+    if a.watch_cmd == "terminate":
+        emit(call(payload))
+        print(f"terminated {a.bundle_id or 'the watch app'}")
+        return
+
+    if a.watch_cmd == "screenshot":
+        local = guest_abspath(
+            a.out or os.path.join(a.workdir or "/workspace", ".mac-sim/watch.png"))
+        res = emit(call({**payload, "out": local}), quiet_stdout=True)
+        if not os.path.exists(local):
+            sys.exit(f"mac-sim: the host wrote {res.get('path')} but it is not "
+                     f"visible at {local}; is that path inside the bind mount?")
+        print(f"{local} ({os.path.getsize(local)} bytes)")
+        return
+
+    payload.update({"last": a.last, "lines": a.lines})
+    if a.predicate:
+        payload["predicate"] = a.predicate
+    elif a.all:
+        payload["all"] = True
+    emit(call(payload))
+
+
 def main():
     def common_options(nested):
         """The options every command takes. A nested parser must not carry
@@ -756,10 +989,37 @@ def main():
     sp = sims.add_parser("create", parents=[nested])
     sp.add_argument("name", nargs="?", default=None,
                     help="default: the checkout directory's name")
+    sp.add_argument("--with-watch", action="store_true",
+                    help="also create a watch, pair it with the new simulator and "
+                         "boot it (the project must declare a \"watch\" block)")
     sp = sims.add_parser("delete", parents=[nested]); sp.add_argument("name")
     sp = sims.add_parser("list", parents=[nested])
     sp.add_argument("--json", action="store_true",
                     help="print one JSON object instead of text")
+    p = add("watch")
+    watch_subs = p.add_subparsers(dest="watch_cmd", required=True)
+    watch_subs.add_parser("build", parents=[nested]).add_argument(
+        "-q", "--quiet", action="store_true",
+        help="do not print the output as it is produced, only its end")
+    watch_subs.add_parser("boot", parents=[nested])
+    sp = watch_subs.add_parser("install", parents=[nested])
+    sp.add_argument("app", nargs="?", default=None,
+                    help="default: what `watch build` produced in this checkout")
+    sp = watch_subs.add_parser("launch", parents=[nested])
+    sp.add_argument("--bundle-id", default=None)
+    sp.add_argument("launch_args", nargs="*", metavar="ARG",
+                    help="handed to the app, after `--`: -GymlogFixture name")
+    sp = watch_subs.add_parser("terminate", parents=[nested])
+    sp.add_argument("--bundle-id", default=None)
+    sp = watch_subs.add_parser("screenshot", parents=[nested])
+    sp.add_argument("out", nargs="?", default=None)
+    sp = watch_subs.add_parser("logs", parents=[nested])
+    sp.add_argument("--bundle-id", default=None)
+    sp.add_argument("--last", default="2m")
+    sp.add_argument("--lines", type=int, default=200)
+    sp.add_argument("--predicate")
+    sp.add_argument("--all", action="store_true",
+                    help="the whole watch log, not only the app's process")
     p = add("openurl"); p.add_argument("url")
     p = add("browse"); p.add_argument("url", help="an https:// URL under a prefix the host allows")
     p = add("appearance"); p.add_argument("mode", nargs="?", choices=["light", "dark"])
@@ -802,56 +1062,7 @@ def main():
         name, rest = resolve_command(commands, first, rest)
         pc, params = command_parser(name, commands.get(name, {}), common)
         a = pc.parse_args(rest)
-        # MAC_SIM_SIM names this checkout's private iOS simulator; an Android
-        # command never runs on it, so only an explicit --sim reaches the shim
-        # (which refuses it).
-        android = android_prefix or commands.get(name, {}).get("platform") == "android"
-        if android and a.sim == SIM and not any(
-                arg == "--sim" or arg.startswith("--sim=") for arg in rest):
-            a.sim = None
-        if a.sim:
-            require_feature("sim", "--sim", health)
-        args = dict(a.arg)
-        args.update({p: v for p in params
-                     if (v := getattr(a, f"param_{p}", None)) is not None})
-        payload = {"verb": "project_command", "command": name,
-                   "args": args, **scope_of(a)}
-        if a.variant:
-            payload["variant"] = a.variant
-        log_stem = f"{name}@{a.sim}" if a.sim else name
-        # After `android`, -d names an emulator, not an iOS simulator.
-        android_device = payload.pop("device", None) if android_prefix else None
-        if android_device == DEVICE:  # MAC_SIM_DEVICE, the iOS default, not a choice
-            android_device = None
-        android_device = android_device or (ANDROID_DEVICE if android_prefix else None)
-        if android_device:
-            require_feature("android_devices", "`mac-sim android -d`", health)
-            payload["android_device"] = android_device
-            for project in health.get("projects", {}).values():
-                if (project.get("android") or {}).get("default") not in (None, android_device):
-                    log_stem = f"{name}@{android_device}"
-        log_path = a.workdir and os.path.join(a.workdir, ".mac-sim", "logs", f"{log_stem}.log")
-        # These run for minutes; say which checkout is being built before the
-        # wait starts, so a wrong-worktree call is caught then and not after.
-        print(f"mac-sim {name}: {a.workdir or 'project root'}", file=sys.stderr)
-        result, followed = call_following(payload, log_path,
-                                          follow=bool(log_path) and not a.quiet)
-        if result.get("stdout_is_log") and a.quiet:
-            result["stdout"] = "\n".join(result["stdout"].splitlines()[-40:])
-        if result.get("log"):
-            print(f"mac-sim {name}: full output in {result['log']}", file=sys.stderr)
-        emitted = emit(result, quiet_stdout=followed and result.get("stdout_is_log", False),
-                       exit_on_failure=False)
-        # One fixed last line on stdout, success or not: an agent that backgrounds a
-        # build waits for it in the captured output. The followed log can miss the
-        # tool's own closing lines (Gradle's BUILD SUCCESSFUL), and loops waiting
-        # for those ran to their 10-minute timeout.
-        code = result.get("exit_code", 0)
-        print(f"mac-sim {name}: exit={code}", flush=True)
-        if code != 0:
-            sys.exit(f"mac-sim: {result.get('verb')} failed on the host "
-                     f"(exit {code}); see output above")
-        return emitted
+        return run_project_command(name, a, commands, params, health, android_prefix, rest)
 
     a = ap.parse_args()
 
@@ -869,8 +1080,12 @@ def main():
                 sys.exit("mac-sim sim: give the simulator a name")
             payload["name"] = name
         if a.sim_cmd == "create":
+            if a.with_watch:
+                require_feature("watch", "sim create --with-watch")
+                payload["with_watch"] = True
             print(f"mac-sim sim create {payload['name']}: creating and booting a "
-                  f"simulator, about a minute", file=sys.stderr)
+                  f"simulator{' and a paired watch' if a.with_watch else ''}, "
+                  f"about a minute{' or two' if a.with_watch else ''}", file=sys.stderr)
         if getattr(a, "json", False):
             require_json()
             return emit_json(call(payload))
@@ -972,6 +1187,9 @@ def main():
                      f"visible at {out}; is that path inside the bind mount?")
         print(f"{out} ({os.path.getsize(out)} bytes)")
         return
+
+    if a.cmd == "watch":
+        return watch_main(a, scope)
 
     if a.cmd == "openurl":
         emit(call({"verb": "openurl", "url": a.url, **scope}))

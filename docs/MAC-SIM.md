@@ -259,6 +259,93 @@ Use `{udid}` and `{port}`, including in `kill_port`, `ready_url` and `log`, whic
 are rendered like `argv`. Pin a test runner to `{udid}` as well: with two
 simulators booted, "the booted one" is no longer one device.
 
+## The Apple Watch app
+
+A project whose iOS app embeds a watch target declares a `watch` block, and
+`mac-sim` then builds that target and drives it on a watch simulator paired with
+the iPhone one:
+
+```
+mac-sim sim create mine --with-watch   # a private iPhone, plus a watch paired with it
+mac-sim --sim mine watch build         # xcodebuild by target, for the watch simulator
+mac-sim --sim mine watch install       # the build from this checkout
+mac-sim --sim mine watch launch -- -MyFixture home
+mac-sim --sim mine watch screenshot .mac-sim/watch.png
+mac-sim --sim mine watch logs --lines 300
+mac-sim --sim mine watch terminate
+```
+
+`watch boot | install [app.app] | launch [--bundle-id ID] [-- ARG...] | terminate
+| screenshot [out.png] | logs` act on the watch paired with the iPhone simulator
+the call targets (`--sim`, or the shared one). They share that simulator's claim,
+so a watch is never driven by a checkout that does not hold its phone. There is
+no `appearance` or privacy verb for the watch. `launch` restarts the app, because
+launch arguments only reach a fresh process; each argument is a plain token
+(letters, digits and `._:=/-`), at most 16 of them.
+
+```json
+"watch": {
+  "device": "Apple Watch Series 11 (46mm)",
+  "project": "apps/mobile/ios/MyApp.xcodeproj",
+  "target": "MyAppWatch",
+  "bundle_id": "com.example.myapp.watchkitapp",
+  "stamp": "apps/mobile/ios/.myapp-watch",
+  "rebuild": { "command": "prebuild", "variant": "clean" }
+}
+```
+
+- **`device`** is the watch model `sim create --with-watch` creates (a name from
+  `xcrun simctl list devicetypes`). It is created on the newest installed watchOS
+  runtime that supports it; `runtime` pins one (an identifier, a version such as
+  `26.0`, or a name). The pair is booted before `sim create` returns, and
+  `sim delete` deletes both.
+- **`project`**, **`target`**, **`configuration`** (`Debug` by default) and
+  **`product`** (the `.app` name, the target's by default) describe the build:
+  `xcodebuild -project <project> -target <target> -sdk watchsimulator`, with no
+  scheme and no pods. Products land in `.mac-sim-build/watch/` of the checkout.
+- **`bundle_id`** is what `launch`, `terminate` and `logs` act on.
+- Without a paired watch, the watch verbs say so and how to make one. The shared
+  simulator has one only if you paired it by hand (`xcrun simctl pair`).
+
+### `--watch` on project commands
+
+Whether the generated native project contains the watch target is decided when
+it is generated, so a command that generates or builds it takes `--watch`, and
+combines it with any profile. A command opts in with a `watch` block, which is
+overlaid on the command like a variant (its `env` is merged, other keys replace);
+a command without one (a bundler, a test runner) refuses the flag.
+
+```json
+"prebuild": {
+  "argv": ["pnpm", "--filter", "@myapp/mobile", "exec", "expo", "prebuild", "--platform", "ios"],
+  "cwd": "apps/mobile",
+  "watch_stamp": "write",
+  "watch": { "env": { "MYAPP_WATCH": "1" } },
+  "variants": { "clean": { "argv": ["pnpm", "--filter", "@myapp/mobile", "exec", "expo",
+                                    "prebuild", "--platform", "ios", "--clean"] } }
+},
+"run": {
+  "argv": ["..."],
+  "watch_stamp": "check",
+  "watch": { "env": { "MYAPP_WATCH": "1" } }
+}
+```
+
+The project's `stamp` file records which way the native project was generated:
+one word, `watch` or `plain`; a missing file means `plain`. A command with
+`"watch_stamp": "write"` writes it after it succeeds. One with `"check"` compares
+it with the flag first, in either direction, and on a mismatch runs the
+project's `rebuild` command (with `--watch` or without, and the named variant),
+then goes on; `rebuild.command` must itself be a `write` command. So toggling
+`--watch` on and off on one checkout regenerates the project each time it
+changes and never otherwise. Without a `rebuild` the mismatch is an error that
+says how to regenerate by hand. The stamp is a hint kept in the checkout, which
+the guest can edit: at worst it makes a build stale, never run something else.
+
+Run natively on the Mac, set the same environment variable yourself and keep the
+stamp in step: `MYAPP_WATCH=1 pnpm exec expo prebuild --clean`, then
+`echo watch > apps/mobile/ios/.myapp-watch` (`echo plain >` without it).
+
 ## The Android emulator
 
 The Android emulator needs a hypervisor the guest does not have, so it runs on
@@ -525,7 +612,8 @@ where `stopped` is the command a reset killed (`{"verb", "pid", "elapsed",
 
 `sim list` answers `{"schemaVersion", "project", "max", "simulators": [...]}`,
 one entry per private simulator, sorted by name: `{"name", "state", "udid",
-"port", "workdir", "created", "age", "claim"}`. `state` is simctl's (`Booted`,
+"port", "watch_udid", "workdir", "created", "age", "claim"}`. `watch_udid` is the
+paired watch from `sim create --with-watch`, or null. `state` is simctl's (`Booted`,
 `Shutdown`, ...), `creating` while `sim create` runs, or `gone` when the
 simulator was deleted outside mac-sim.
 
@@ -539,8 +627,9 @@ properties as fields.
 "projects": {...}}`. `checkout` is the checkout this call acts on (null outside
 one); `projects` is the shim's `/health` description of each declared project:
 its `root`, `owner`, `executing`, `defaults`, `pull` aliases, `simulators`,
-`android` emulators and `commands` (each with `platform`, `variants` and
-`params`).
+`android` emulators, `watch` (`stamp`, `rebuild`, `bundle_id`, or null) and
+`commands` (each with `platform`, `variants`, `params`, `watch` and
+`watch_stamp`).
 
 ## Running mac-sim on the Mac
 

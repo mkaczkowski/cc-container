@@ -18,6 +18,11 @@ Two kinds of verb:
     fixed host steps behind one request, so they are functions here rather than
     one argv.
 
+A project that declares a `watch` block also gets the watch verbs (watch_build,
+watch_boot, watch_install, ...): the Apple Watch app is built by target for the
+watch simulator and driven on the watch paired with the iPhone simulator the
+request targets, under that simulator's own claim.
+
 A request carrying "platform": "android" is served from the project's `android`
 block instead: the same verbs (boot, install, screenshot, logs, ...) mapped onto
 the Android SDK's `emulator` and `adb`, under a claim of their own, so an
@@ -109,12 +114,22 @@ LOCALE_RE = re.compile(r"^[A-Za-z]{2,3}([_-][A-Za-z0-9]{2,8}){0,2}$")
 EXECUTABLE_RE = re.compile(r"^[A-Za-z0-9._ -]{1,64}$")
 AVD_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 
+WATCH_VERBS = {"watch_build", "watch_boot", "watch_install", "watch_launch",
+               "watch_terminate", "watch_screenshot", "watch_logs"}
+
 BUILTIN_VERBS = [
     "list", "booted", "runtimes", "boot", "shutdown", "open_simulator_ui",
     "install", "uninstall", "launch", "terminate", "screenshot", "openurl",
     "appearance", "logs", "xcodebuild", "project_command", "lock",
     "sim_create", "sim_delete", "sim_list", "pull", "status", "browse",
-]
+] + sorted(WATCH_VERBS)
+
+# Where `watch_build` puts its products, relative to the checkout.
+WATCH_BUILD_DIR = ".mac-sim-build/watch"
+# An argument handed to the watch app at launch (-GymlogFixture name): a flag or
+# a plain token, never anything a shell or a URL would give meaning to.
+LAUNCH_ARG_RE = re.compile(r"^[A-Za-z0-9._:=-][A-Za-z0-9._:=/-]{0,127}$")
+MAX_LAUNCH_ARGS = 16
 
 # Verbs made of several host steps; see the "Direct verbs" section.
 DIRECT_VERBS = {"sim_create", "sim_delete", "sim_list", "pull", "status"}
@@ -123,7 +138,7 @@ DIRECT_VERBS = {"sim_create", "sim_delete", "sim_list", "pull", "status"}
 # simulator" into "act on the shared one". The guest checks this list before
 # sending such a field, so a stale shim is reported instead of obeyed wrongly.
 FEATURES = ["appearance", "locale", "pull", "sim", "progress", "status", "android",
-            "android_devices", "browse", "json"]
+            "android_devices", "browse", "json", "watch"]
 
 # The shape of the "data" object that status, lock, sim_list and android list
 # reply with, for `mac-sim <verb> --json`. Adding a field keeps the version;
@@ -138,7 +153,9 @@ GLOBAL_VERBS = {"list", "booted", "runtimes", "open_simulator_ui", "browse"}
 # concurrently produce nonsense. Read-only observation (screenshot, logs) is
 # deliberately absent: blocking it would break debugging for no safety gain.
 EXCLUSIVE_BUILTINS = {"boot", "shutdown", "install", "uninstall", "launch",
-                      "terminate", "openurl", "appearance", "xcodebuild"}
+                      "terminate", "openurl", "appearance", "xcodebuild",
+                      "watch_build", "watch_boot", "watch_install", "watch_launch",
+                      "watch_terminate"}
 
 # What a "platform": "android" request may ask for. The direct ones are several
 # adb steps (or binary output) behind one request; none of them changes state.
@@ -216,6 +233,9 @@ class Config:
                 raise ValueError(f"project {name}: 'simulators' must be an object")
             if entry.get("android") is not None:
                 entry["android"] = parse_android(name, entry["android"], entry["defaults"])
+            if entry.get("watch") is not None:
+                entry["watch"] = parse_watch(name, entry["watch"], entry["commands"])
+            check_watch_commands(name, entry.get("watch"), entry["commands"])
             self.projects[name] = entry
         if not self.projects:
             raise ValueError("config declares no projects")
@@ -298,6 +318,68 @@ def parse_android(name, raw, defaults):
         "boot_timeout": int(raw.get("boot_timeout", 600)),
         "devices": devices, "default": default,
     }
+
+
+def parse_watch(name, raw, commands):
+    """Validate a project's `watch` block once, at startup, so a typo fails the
+    shim's start and not the first watch verb an agent sends."""
+    if not isinstance(raw, dict):
+        raise ValueError(f"project {name}: 'watch' must be an object")
+    known = {"device", "runtime", "project", "target", "product", "bundle_id",
+             "configuration", "stamp", "rebuild"}
+    unknown = set(raw) - known
+    if unknown:
+        raise ValueError(f"project {name}: unknown watch keys {sorted(unknown)}; "
+                         f"expected a subset of {sorted(known)}")
+    for key, pattern in (("device", DEVICE_RE), ("target", SCHEME_RE),
+                         ("product", SCHEME_RE), ("bundle_id", BUNDLE_RE)):
+        if key in raw and not (isinstance(raw[key], str) and pattern.match(raw[key])):
+            raise ValueError(f"project {name}: watch.{key} is invalid: {raw[key]!r}")
+    for key in ("project", "target", "bundle_id"):
+        if key not in raw:
+            raise ValueError(f"project {name}: watch.{key} is required")
+    if raw.get("configuration", "Debug") not in ("Debug", "Release"):
+        raise ValueError(f"project {name}: watch.configuration must be Debug or Release")
+    if "runtime" in raw and not (isinstance(raw["runtime"], str) and
+                                 re.match(r"^[A-Za-z0-9._-]{1,128}$", raw["runtime"])):
+        raise ValueError(f"project {name}: watch.runtime is invalid: {raw['runtime']!r}")
+    rebuild = raw.get("rebuild")
+    if rebuild is not None:
+        command = rebuild.get("command") if isinstance(rebuild, dict) else None
+        if command not in commands:
+            raise ValueError(f"project {name}: watch.rebuild.command {command!r} is not "
+                             f"a declared command ({sorted(commands) or 'none'})")
+        variant = rebuild.get("variant")
+        if variant is not None and variant not in commands[command].get("variants", {}):
+            raise ValueError(f"project {name}: watch.rebuild.variant {variant!r} is not "
+                             f"a variant of {command!r}")
+        if "watch" not in commands[command]:
+            raise ValueError(f"project {name}: watch.rebuild.command {command!r} has no "
+                             f"\"watch\" block, so it cannot take --watch")
+        if "stamp" not in raw:
+            raise ValueError(f"project {name}: watch.rebuild needs watch.stamp")
+        if commands[command].get("watch_stamp") != "write":
+            raise ValueError(f"project {name}: watch.rebuild.command {command!r} must "
+                             f"declare \"watch_stamp\": \"write\", or the stamp never "
+                             f"changes and every run would regenerate")
+    return raw
+
+
+def check_watch_commands(name, watch, commands):
+    """The per-command watch keys, checked whether or not the project has a
+    `watch` block: a stamp key with nowhere to point must fail at startup."""
+    for cname, spec in commands.items():
+        if "watch" in spec and not isinstance(spec["watch"], dict):
+            raise ValueError(f"project {name}: command {cname!r}: 'watch' must be an object")
+        if spec.get("watch_stamp", "write") not in ("write", "check"):
+            raise ValueError(f"project {name}: command {cname!r}: watch_stamp must be "
+                             f"\"write\" or \"check\"")
+        if "watch_stamp" in spec and "stamp" not in (watch or {}):
+            raise ValueError(f"project {name}: command {cname!r} declares watch_stamp "
+                             f"but the project's watch block has no stamp")
+        if "watch_stamp" in spec and "watch" not in spec:
+            raise ValueError(f"project {name}: command {cname!r} declares watch_stamp "
+                             f"but no \"watch\" block, so it cannot take --watch")
 
 
 def parse_browse_allow(raw):
@@ -595,8 +677,12 @@ def merge_variant(spec, variant_name):
     if variant_name not in variants:
         raise Rejected(f"unknown variant {variant_name!r}; "
                        f"declared: {sorted(variants) or 'none'}")
+    return overlay_spec(spec, variants[variant_name])
+
+
+def overlay_spec(spec, overlay):
+    """`spec` with `overlay` on top: its env merged in, every other key replaced."""
     merged = dict(spec)
-    overlay = variants[variant_name]
     for key, value in overlay.items():
         if key == "env":
             merged["env"] = {**spec.get("env", {}), **value}
@@ -605,13 +691,28 @@ def merge_variant(spec, variant_name):
     return merged
 
 
+def merge_watch(name, spec, requested):
+    """Apply the `--watch` modifier. It combines with a variant, and only a
+    command that declares a "watch" block takes it: a bundler or a test runner
+    has no native project to put a watch target in."""
+    if requested is None or requested is False:
+        return spec
+    if requested is not True:
+        raise Rejected("'watch' must be true")
+    if "watch" not in spec:
+        raise Rejected(f"command {name!r} does not take --watch; its config has no "
+                       f"\"watch\" block")
+    return overlay_spec(spec, spec["watch"])
+
+
 def project_command(body, project, base, sim=None):
     name = field(body, "command", NAME_RE)
     commands = project["commands"]
     if name not in commands:
         raise Rejected(f"project {project['name']!r} declares no command {name!r}; "
                        f"available: {sorted(commands) or 'none'}")
-    spec = merge_variant(commands[name], body.get("variant"))
+    spec = merge_watch(name, merge_variant(commands[name], body.get("variant")),
+                       body.get("watch"))
     # The config decides a command's platform, never the caller: it picks the
     # claim, the device and the bundler port the command runs against.
     platform = spec.get("platform", "ios")
@@ -808,6 +909,31 @@ def build_command(verb, body, config):
     return argv, timeout, extra, project
 
 
+def simctl_log_argv(body, udid, default_bundle):
+    """`log show` on one simulator, bounded: a finite dump, never a stream.
+    Returns the argv and how many trailing lines to keep."""
+    lines = body.get("lines", 200)
+    if not isinstance(lines, int) or not 1 <= lines <= 5000:
+        raise Rejected("lines must be an int in 1..5000")
+    argv = ["xcrun", "simctl", "spawn", udid,
+            "log", "show", "--style", "compact", "--last",
+            field(body, "last", LAST_RE, required=False, default="2m")]
+    if "predicate" in body:
+        pred = body["predicate"]
+        if not isinstance(pred, str) or len(pred) > 512 or '"' in pred:
+            raise Rejected("invalid predicate")
+        argv += ["--predicate", pred]
+    elif not body.get("all"):
+        # The simulator's own daemons write nearly all of the unified log, so
+        # the unfiltered dump buries the app. Scope to its process by default.
+        bundle = field(body, "bundle_id", BUNDLE_RE, required=False, default=default_bundle)
+        if not bundle:
+            raise Rejected("no bundle_id to scope the log to; pass --all for the "
+                           "unfiltered log, or --predicate")
+        argv += ["--predicate", f'process == "{app_executable(udid, bundle)}"']
+    return argv, lines
+
+
 def dispatch(verb, body, project, base, sim=None):
     if verb == "list":
         return ["xcrun", "simctl", "list", "devices", "available", "--json"], 60, {}
@@ -874,28 +1000,8 @@ def dispatch(verb, body, project, base, sim=None):
         return ["xcrun", "simctl", "ui", udid, "appearance", mode], 60, {}
 
     if verb == "logs":
-        # Bounded: a finite dump, never an unbounded stream.
-        lines = body.get("lines", 200)
-        if not isinstance(lines, int) or not 1 <= lines <= 5000:
-            raise Rejected("lines must be an int in 1..5000")
-        udid = resolve_device(body, project)
-        argv = ["xcrun", "simctl", "spawn", udid,
-                "log", "show", "--style", "compact", "--last",
-                field(body, "last", LAST_RE, required=False, default="2m")]
-        if "predicate" in body:
-            pred = body["predicate"]
-            if not isinstance(pred, str) or len(pred) > 512 or '"' in pred:
-                raise Rejected("invalid predicate")
-            argv += ["--predicate", pred]
-        elif not body.get("all"):
-            # The simulator's own daemons write nearly all of the unified log, so
-            # the unfiltered dump buries the app. Scope to its process by default.
-            bundle = field(body, "bundle_id", BUNDLE_RE, required=False,
-                           default=project["defaults"].get("bundle_id"))
-            if not bundle:
-                raise Rejected("no bundle_id to scope the log to; pass --all for the "
-                               "unfiltered log, or --predicate")
-            argv += ["--predicate", f'process == "{app_executable(udid, bundle)}"']
+        argv, lines = simctl_log_argv(body, resolve_device(body, project),
+                                      project["defaults"].get("bundle_id"))
         return argv, 180, {"tail": lines}
 
     if verb == "xcodebuild":
@@ -920,7 +1026,127 @@ def dispatch(verb, body, project, base, sim=None):
     if verb == "project_command":
         return project_command(body, project, base, sim)
 
+    if verb in WATCH_VERBS:
+        return watch_dispatch(verb, body, project, base, sim)
+
     raise Rejected(f"unknown verb: {verb!r}")
+
+
+# --------------------------------------------------------------------------
+# Apple Watch
+# --------------------------------------------------------------------------
+# A watch app is built by target for the watch simulator (no scheme, no pods) and
+# runs on the watch paired with the iPhone simulator the request targets, so it
+# shares that simulator's claim: `--sim mine watch launch` and `--sim mine
+# launch` are one device pair, and two checkouts never drive it at once.
+#
+# The `watch` block of the project config names the project, the target and the
+# bundle id; a project without it has no watch verbs at all.
+def watch_config(project):
+    cfg = project.get("watch")
+    if cfg is None:
+        raise Rejected(
+            f"project {project['name']!r} declares no \"watch\" block in the host "
+            f"config, so it has no watch verbs. See docs/MAC-SIM.md.")
+    return cfg
+
+
+def watch_app_path(cfg, project, base):
+    """Where `watch_build` leaves the app."""
+    product = cfg.get("product", cfg["target"])
+    configuration = cfg.get("configuration", "Debug")
+    return safe_path(f"{WATCH_BUILD_DIR}/{configuration}-watchsimulator/{product}.app",
+                     project, base=base)
+
+
+def paired_watches(phone_udid):
+    pairs = json.loads(run_host(["xcrun", "simctl", "list", "pairs", "--json"], 60))
+    return [pair["watch"] for pair in pairs.get("pairs", {}).values()
+            if pair.get("phone", {}).get("udid") == phone_udid]
+
+
+def resolve_watch(body, project):
+    """The UDID of the watch paired with the iPhone simulator the request targets."""
+    watch_config(project)
+    phone = resolve_device(body, project)
+    watches = paired_watches(phone)
+    if not watches:
+        raise Rejected(
+            f"the iPhone simulator {phone} has no paired watch. `mac-sim sim create "
+            f"<name> --with-watch` makes a private pair; for the shared simulator, "
+            f"pair one by hand (`xcrun simctl pair <watch> {phone}`).")
+    if len(watches) > 1:
+        booted = [w for w in watches if w.get("state") == "Booted"]
+        if len(booted) != 1:
+            raise Rejected(
+                f"the iPhone simulator {phone} is paired with {len(watches)} watches "
+                f"({', '.join(w.get('name', '?') + ' ' + w['udid'] for w in watches)}) "
+                f"and not exactly one is booted; unpair the extra ones with "
+                f"`xcrun simctl unpair`.")
+        return booted[0]["udid"]
+    return watches[0]["udid"]
+
+
+def watch_dispatch(verb, body, project, base, sim=None):
+    cfg = watch_config(project)
+
+    if verb == "watch_build":
+        xcodeproj = safe_path(cfg["project"], project, base=base, must_exist=True)
+        if xcodeproj.suffix != ".xcodeproj":
+            raise Rejected(f"watch.project must be an .xcodeproj, got {xcodeproj}")
+        out = safe_path(WATCH_BUILD_DIR, project, base=base)
+        # By target, not scheme: the generated project may carry no watch scheme,
+        # and the watch target needs nothing from the workspace's pods.
+        argv = ["xcodebuild", "-project", str(xcodeproj), "-target", cfg["target"],
+                "-sdk", "watchsimulator",
+                "-configuration", cfg.get("configuration", "Debug"),
+                f"SYMROOT={out}", f"OBJROOT={out}/obj", "build"]
+        return argv, 2400, {
+            "cwd": str(base), "app": str(watch_app_path(cfg, project, base)),
+            "log": str(command_log_path(project, base, "watch-build", sim))}
+
+    udid = resolve_watch(body, project)
+    bundle = field(body, "bundle_id", BUNDLE_RE, required=False, default=cfg["bundle_id"])
+
+    if verb == "watch_boot":
+        return ["xcrun", "simctl", "boot", udid], 180, {}
+
+    if verb == "watch_install":
+        raw = body.get("app")
+        app = safe_path(raw, project, base=base, must_exist=True) if raw \
+            else watch_app_path(cfg, project, base)
+        if not app.exists():
+            raise Rejected(f"no watch app at {app}; run `mac-sim watch build` first")
+        if app.suffix != ".app":
+            raise Rejected("watch install requires a .app bundle")
+        return (["xcrun", "simctl", "install", udid, str(app)], 300,
+                {"bundle_id": app_bundle_id(app)})
+
+    if verb == "watch_launch":
+        args = body.get("args", [])
+        if not isinstance(args, list) or len(args) > MAX_LAUNCH_ARGS or not all(
+                isinstance(a, str) and LAUNCH_ARG_RE.match(a) for a in args):
+            raise Rejected(f"launch args must be at most {MAX_LAUNCH_ARGS} plain tokens "
+                           f"({LAUNCH_ARG_RE.pattern}), got {args!r}")
+        # Arguments reach only a fresh process: launching a running app just
+        # foregrounds it with the arguments it already had.
+        return (["xcrun", "simctl", "launch", "--terminate-running-process", udid, bundle]
+                + args, 120, {})
+
+    if verb == "watch_terminate":
+        return ["xcrun", "simctl", "terminate", udid, bundle], 120, {}
+
+    if verb == "watch_screenshot":
+        out = safe_path(body.get("out"), project, base=base)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        return (["xcrun", "simctl", "io", udid, "screenshot", str(out)], 120,
+                {"path": str(out)})
+
+    if verb == "watch_logs":
+        argv, lines = simctl_log_argv({**body, "bundle_id": bundle}, udid, bundle)
+        return argv, 180, {"tail": lines}
+
+    raise Rejected(f"unknown watch verb: {verb!r}")
 
 
 # --------------------------------------------------------------------------
@@ -1055,12 +1281,53 @@ def patched_app_copy(app, keys, workdir):
     return str(copy)
 
 
+def create_paired_watch(device_name, phone_udid, cfg):
+    """Create a watch simulator of the configured model on the newest watchOS
+    runtime installed, pair it with the iPhone and boot it. Returns its UDID."""
+    types = json.loads(run_host(["xcrun", "simctl", "list", "devicetypes", "--json"], 60))
+    wanted = next((t for t in types.get("devicetypes", []) if t.get("name") == cfg["device"]), None)
+    if wanted is None:
+        known = sorted(t["name"] for t in types.get("devicetypes", [])
+                       if "Watch" in t.get("name", ""))
+        raise Rejected(f"watch.device {cfg['device']!r} is not a simulator device type "
+                       f"on this Mac; watch models: {', '.join(known) or 'none'}")
+    runtimes = json.loads(run_host(["xcrun", "simctl", "list", "runtimes", "--json"], 60))
+    pinned = cfg.get("runtime")
+    usable = [r for r in runtimes.get("runtimes", [])
+              if r.get("platform") == "watchOS" and r.get("isAvailable")
+              and wanted["identifier"] in [d.get("identifier") for d in r.get("supportedDeviceTypes", [])]
+              and (pinned is None or pinned in (r.get("identifier"), r.get("version"), r.get("name")))]
+    if not usable:
+        raise Rejected(
+            f"no available watchOS runtime supports {cfg['device']!r}"
+            + (f" and matches watch.runtime {pinned!r}" if pinned else "")
+            + ". Install one in Xcode (Settings > Components).")
+    runtime = max(usable, key=lambda r: [int(part) for part in re.findall(r"\d+", r.get("version", "0"))])
+    watch_udid = run_host(["xcrun", "simctl", "create", device_name,
+                           wanted["identifier"], runtime["identifier"]], 120)
+    if not UDID_RE.match(watch_udid):
+        raise HostFailure(["xcrun", "simctl", "create"], 1,
+                          f"expected a UDID, got {watch_udid!r}")
+    try:
+        run_host(["xcrun", "simctl", "pair", watch_udid, phone_udid], 120)
+        run_host(["xcrun", "simctl", "boot", watch_udid], 180)
+        run_host(["xcrun", "simctl", "bootstatus", watch_udid, "-b"], 600)
+    except BaseException:
+        subprocess.run(["xcrun", "simctl", "delete", watch_udid], capture_output=True)
+        raise
+    return watch_udid
+
+
 def sim_create(body, project, base):
     cfg = simulators_config(project)
     pname = project["name"]
     name = field(body, "name", SIM_NAME_RE)
     if name == "android":
         raise Rejected("'android' names the Android emulator's claim; pick another name")
+    with_watch = body.get("with_watch", False)
+    if with_watch not in (True, False):
+        raise Rejected("'with_watch' must be true or false")
+    watch_cfg = watch_config(project) if with_watch else None
     limit = int(cfg.get("max", 3))
     port_base = int(cfg.get("port_base", 8090))
 
@@ -1085,7 +1352,7 @@ def sim_create(body, project, base):
                       "guest_workdir": to_guest_path(project, base), "created": time.time()}
         write_sims(pname, sims)
 
-    udid, notes = None, []
+    udid, watch_udid, notes = None, None, []
     try:
         source_udid = resolve_device({}, project)
         source = simctl_devices()[source_udid]
@@ -1142,9 +1409,13 @@ def sim_create(body, project, base):
         for key, template in cfg.get("global_defaults", {}).items():
             run_host(["xcrun", "simctl", "spawn", udid, "defaults", "write", "-g",
                       key, render(str(template), {"port": port, "sim": name})], 60)
+        if with_watch:
+            watch_udid = create_paired_watch(f"{pname}-{name}-watch", udid, watch_cfg)
     except BaseException:
-        if udid and UDID_RE.match(udid):
-            subprocess.run(["xcrun", "simctl", "delete", udid], capture_output=True)
+        # The watch first: a device is paired to the phone until one of them goes.
+        for leftover in (watch_udid, udid):
+            if leftover and UDID_RE.match(leftover):
+                subprocess.run(["xcrun", "simctl", "delete", leftover], capture_output=True)
         with _SIMS_LOCK:
             sims = read_sims(pname)
             sims.pop(name, None)
@@ -1154,13 +1425,18 @@ def sim_create(body, project, base):
     with _SIMS_LOCK:
         sims = read_sims(pname)
         sims[name].update({"state": "ready", "udid": udid})
+        if watch_udid:
+            sims[name]["watch_udid"] = watch_udid
         write_sims(pname, sims)
     lines = [f"created simulator {name!r} ({pname}-{name})",
              f"  udid: {udid}",
              f"  bundler port: {port}",
-             f"  app: {'copied from the shared simulator' if app else 'none installed'}",
-             f"Target it with --sim {name} on any command."] + notes
-    return "\n".join(lines), {"sim": name, "udid": udid, "port": port}
+             f"  app: {'copied from the shared simulator' if app else 'none installed'}"]
+    if watch_udid:
+        lines.append(f"  watch: {watch_udid} (paired, booted; shares this claim)")
+    lines.append(f"Target it with --sim {name} on any command.")
+    return "\n".join(lines + notes), {"sim": name, "udid": udid, "port": port,
+                                      "watch_udid": watch_udid}
 
 
 def sim_delete(body, project, base):
@@ -1172,9 +1448,10 @@ def sim_delete(body, project, base):
         raise Rejected(f"{pname} has no private simulator {name!r}; only simulators "
                        f"created with `mac-sim sim create` can be deleted")
     kill_port(entry["port"])  # its bundler, which serves nothing once the device is gone
-    udid = entry.get("udid")
-    if udid:
-        device = simctl_devices().get(udid)
+    # The watch first: a device is paired to the phone until one of them goes.
+    devices = simctl_devices()
+    for udid in (entry.get("watch_udid"), entry.get("udid")):
+        device = devices.get(udid) if udid else None
         if device:
             if device["state"] != "Shutdown":
                 run_host(["xcrun", "simctl", "shutdown", udid], 120)
@@ -1210,12 +1487,13 @@ def sim_list(body, project, base):
         lock = f"{pname}@{name}"
         data["simulators"].append({
             "name": name, "state": kind, "udid": entry.get("udid"),
-            "port": entry.get("port"),
+            "port": entry.get("port"), "watch_udid": entry.get("watch_udid"),
             "workdir": entry.get("guest_workdir") or entry.get("workdir"),
             "created": entry.get("created"), "age": age,
             "claim": owner_data(lock, Handler.config.lock_ttl)})
         lines.append(f"  {name:<16} {state:<10} port {entry.get('port')}  "
-                     f"{entry.get('udid', '-')}  from "
+                     f"{entry.get('udid', '-')}"
+                     f"{'  +watch ' + entry['watch_udid'] if entry.get('watch_udid') else ''}  from "
                      f"{entry.get('guest_workdir') or entry.get('workdir')}, "
                      f"{age // 3600}h {age % 3600 // 60}m old")
     return "\n".join(lines), {"simulators": sims, "data": data}
@@ -2012,9 +2290,15 @@ class Handler(BaseHTTPRequestHandler):
                                     "owner": read_owner(lock), "executing": _executing_info(lock)}
                             for dname, d in p["android"]["devices"].items()
                             for lock in [android_config(p, {"android_device": dname})["lock"]]}},
+                    "watch": None if p.get("watch") is None else {
+                        "stamp": p["watch"].get("stamp"),
+                        "rebuild": p["watch"].get("rebuild"),
+                        "bundle_id": p["watch"]["bundle_id"]},
                     "commands": {
                         cname: {
                             "platform": c.get("platform", "ios"),
+                            "watch": "watch" in c,
+                            "watch_stamp": c.get("watch_stamp"),
                             "variants": sorted(c.get("variants", {})),
                             "params": {k: {kk: vv for kk, vv in v.items() if kk != "pattern"}
                                        for k, v in c.get("params", {}).items()},
