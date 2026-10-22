@@ -25,7 +25,9 @@ Read [SECURITY.md](../SECURITY.md) first, especially the part about why this fil
 must not live inside a project root.
 
 Declare at minimum a project `name`, its `root`, and `defaults.device`. Add
-`commands` for anything beyond the built-in simulator verbs.
+`commands` for anything beyond the built-in simulator verbs. With several
+projects declared, a request without `-p` acts on the project whose root holds
+the caller's checkout, and is refused from a checkout outside every root.
 `../examples/expo-monorepo.mac-sim.json` is a full worked example.
 
 ## Usage from inside the container

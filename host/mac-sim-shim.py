@@ -263,14 +263,33 @@ class Config:
     def roots(self):
         return [p["root"] for p in self.projects.values()]
 
-    def project(self, name):
+    def project(self, name, workdir=None):
+        """The named project, or with no name the only one, or the one whose
+        root holds the caller's checkout (`workdir`, a guest path), so a guest
+        working in one project need not pass -p once several are configured."""
         if name is None:
             if len(self.projects) == 1:
                 return next(iter(self.projects.values()))
-            raise Rejected("field 'project' is required when several are configured")
+            owner = self.project_of(workdir)
+            if owner is None:
+                raise Rejected(
+                    f"field 'project' is required: workdir {workdir!r} is under none of "
+                    f"the configured roots ({', '.join(str(r) for r in self.roots)})")
+            return owner
         if name not in self.projects:
             raise Rejected(f"unknown project: {name!r}")
         return self.projects[name]
+
+    def project_of(self, workdir):
+        """The project whose root (or guest mount) holds `workdir`, the deepest
+        one when roots nest; None for no workdir or one outside every root."""
+        if not isinstance(workdir, str) or not workdir:
+            return None
+        path = Path(workdir)
+        held = [p for p in self.projects.values()
+                if any(path == r or r in path.parents
+                       for r in (p["root"], Path(p["guest_mount"])))]
+        return max(held, key=lambda p: len(p["root"].parts), default=None)
 
 
 def parse_emulator(name, dname, raw, base):
@@ -936,7 +955,7 @@ def build_command(verb, body, config):
     if verb in GLOBAL_VERBS:
         argv, timeout, extra = dispatch(verb, body, None, None)
         return argv, timeout, extra, None
-    project = config.project(body.get("project"))
+    project = config.project(body.get("project"), body.get("workdir"))
     base = resolve_workdir(body, project)
     sim = resolve_sim(body, project)
     if sim:
@@ -2532,7 +2551,7 @@ class Handler(BaseHTTPRequestHandler):
         that simulator, so a second checkout cannot delete one in use."""
         claim, previous_owner, done = None, None, False
         try:
-            project = self.config.project(body.get("project"))
+            project = self.config.project(body.get("project"), body.get("workdir"))
             base = resolve_workdir(body, project)
             if verb in ("sim_create", "sim_delete") and self.config.lock_enabled:
                 sim_name = field(body, "name", SIM_NAME_RE)
@@ -2582,7 +2601,7 @@ class Handler(BaseHTTPRequestHandler):
         """Inspect, hand back, or force-clear the claim. Never runs a subprocess
         itself -- `reset` stops the tracked subprocess of an in-flight command,
         which is what actually frees the execution lock (see kill_active)."""
-        project = self.config.project(body.get("project"))
+        project = self.config.project(body.get("project"), body.get("workdir"))
         if body.get("platform") == "android":
             name = android_config(project, body)["lock"]
         elif body.get("platform") == "device":
