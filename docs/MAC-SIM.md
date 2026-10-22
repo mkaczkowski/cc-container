@@ -243,7 +243,11 @@ mac-sim sim delete mine
 
 `sim create` makes a device of the same type and runtime as the project's default
 one, named `<project>-<name>`, and then does what the project's `simulators`
-block declares:
+block declares. `--type <model>` makes another model on that runtime instead,
+e.g. `mac-sim sim create mine-ipad --type "iPad Pro 13-inch (M4)"` for the tablet
+layout: the app copied from the shared simulator runs on it unchanged. A model the
+runtime cannot run is refused with the ones it can, and a watch pairs only with an
+iPhone, so `--with-watch` takes no iPad:
 
 ```json
 "simulators": {
@@ -706,8 +710,9 @@ where `stopped` is the command a reset killed (`{"verb", "pid", "elapsed",
 
 `sim list` answers `{"schemaVersion", "project", "max", "simulators": [...]}`,
 one entry per private simulator, sorted by name: `{"name", "state", "udid",
-"port", "watch_udid", "workdir", "created", "age", "claim"}`. `watch_udid` is the
-paired watch from `sim create --with-watch`, or null. `state` is simctl's (`Booted`,
+"port", "watch_udid", "device_type", "workdir", "created", "age", "claim"}`.
+`watch_udid` is the paired watch from `sim create --with-watch`, or null;
+`device_type` the model from `sim create --type`, or null (the shared simulator's). `state` is simctl's (`Booted`,
 `Shutdown`, ...), `creating` while `sim create` runs, or `gone` when the
 simulator was deleted outside mac-sim.
 

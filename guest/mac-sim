@@ -1088,6 +1088,10 @@ def main():
     sp.add_argument("--with-watch", action="store_true",
                     help="also create a watch, pair it with the new simulator and "
                          "boot it (the project must declare a \"watch\" block)")
+    sp.add_argument("--type", default=None, metavar="MODEL",
+                    help="another model than the shared simulator's, on its runtime "
+                         "and with its app, e.g. \"iPad Pro 13-inch (M4)\" for a "
+                         "tablet layout (`xcrun simctl list devicetypes` names them)")
     sp = sims.add_parser("delete", parents=[nested]); sp.add_argument("name")
     sp = sims.add_parser("list", parents=[nested])
     sp.add_argument("--json", action="store_true",
@@ -1190,6 +1194,9 @@ def main():
             if a.with_watch:
                 require_feature("watch", "sim create --with-watch")
                 payload["with_watch"] = True
+            if a.type:
+                require_feature("sim_type", "sim create --type")
+                payload["device_type"] = a.type
             print(f"mac-sim sim create {payload['name']}: creating and booting a "
                   f"simulator{' and a paired watch' if a.with_watch else ''}, "
                   f"about a minute{' or two' if a.with_watch else ''}", file=sys.stderr)

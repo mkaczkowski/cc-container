@@ -154,7 +154,7 @@ DIRECT_VERBS = {"sim_create", "sim_delete", "sim_list", "pull", "status"}
 # simulator" into "act on the shared one". The guest checks this list before
 # sending such a field, so a stale shim is reported instead of obeyed wrongly.
 FEATURES = ["appearance", "locale", "pull", "sim", "progress", "status", "android",
-            "android_devices", "browse", "json", "watch", "device"]
+            "android_devices", "browse", "json", "watch", "device", "sim_type"]
 
 # The shape of the "data" object that status, lock, sim_list and android list
 # reply with, for `mac-sim <verb> --json`. Adding a field keeps the version;
@@ -1463,6 +1463,22 @@ def patched_app_copy(app, keys, workdir):
     return str(copy)
 
 
+def sim_device_type(name, runtime_id):
+    """The simctl device type named `name` that the shared simulator's runtime
+    can run (an iPad for a tablet layout), as its identifier."""
+    types = json.loads(run_host(["xcrun", "simctl", "list", "devicetypes", "--json"], 60))
+    runtimes = json.loads(run_host(["xcrun", "simctl", "list", "runtimes", "--json"], 60))
+    runtime = next((r for r in runtimes.get("runtimes", []) if r.get("identifier") == runtime_id), {})
+    supported = {d.get("identifier"): d.get("name") for d in runtime.get("supportedDeviceTypes", [])}
+    wanted = next((t for t in types.get("devicetypes", []) if t.get("name") == name), None)
+    if wanted is None or wanted["identifier"] not in supported:
+        known = sorted(n for n in supported.values() if n and ("iPad" in n or "iPhone" in n))
+        raise Rejected(f"{name!r} is not a simulator device type the shared simulator's "
+                       f"runtime ({runtime.get('name', runtime_id)}) runs; it runs: "
+                       f"{', '.join(known) or 'none'}")
+    return wanted["identifier"]
+
+
 def create_paired_watch(device_name, phone_udid, cfg):
     """Create a watch simulator of the configured model on the newest watchOS
     runtime installed, pair it with the iPhone and boot it. Returns its UDID."""
@@ -1510,6 +1526,12 @@ def sim_create(body, project, base):
     if with_watch not in (True, False):
         raise Rejected("'with_watch' must be true or false")
     watch_cfg = watch_config(project) if with_watch else None
+    # Another model than the shared simulator's (an iPad beside the iPhone), on
+    # the same runtime, so the shared simulator's app runs on it unchanged.
+    device_type = field(body, "device_type", DEVICE_RE, required=False)
+    if device_type and with_watch and "iPhone" not in device_type:
+        raise Rejected(f"a watch pairs only with an iPhone, not {device_type!r}; "
+                       f"drop --with-watch or --type")
     limit = int(cfg.get("max", 3))
     port_base = int(cfg.get("port_base", 8090))
 
@@ -1556,8 +1578,10 @@ def sim_create(body, project, base):
                     f"{source['name']!r}, so there is no build to copy. Install one "
                     f"there first (the project's build command). [{exc}]")
 
+        type_id = (sim_device_type(device_type, source["runtime"]) if device_type
+                   else source["deviceTypeIdentifier"])
         udid = run_host(["xcrun", "simctl", "create", f"{pname}-{name}",
-                         source["deviceTypeIdentifier"], source["runtime"]], 120)
+                         type_id, source["runtime"]], 120)
         if not UDID_RE.match(udid):
             raise HostFailure(["xcrun", "simctl", "create"], 1,
                               f"expected a UDID, got {udid!r}")
@@ -1607,11 +1631,14 @@ def sim_create(body, project, base):
     with _SIMS_LOCK:
         sims = read_sims(pname)
         sims[name].update({"state": "ready", "udid": udid})
+        if device_type:
+            sims[name]["device_type"] = device_type
         if watch_udid:
             sims[name]["watch_udid"] = watch_udid
         write_sims(pname, sims)
     lines = [f"created simulator {name!r} ({pname}-{name})",
              f"  udid: {udid}",
+             f"  device: {device_type or source['name']}",
              f"  bundler port: {port}",
              f"  app: {'copied from the shared simulator' if app else 'none installed'}"]
     if watch_udid:
@@ -1670,6 +1697,7 @@ def sim_list(body, project, base):
         data["simulators"].append({
             "name": name, "state": kind, "udid": entry.get("udid"),
             "port": entry.get("port"), "watch_udid": entry.get("watch_udid"),
+            "device_type": entry.get("device_type"),
             "workdir": entry.get("guest_workdir") or entry.get("workdir"),
             "created": entry.get("created"), "age": age,
             "claim": owner_data(lock, Handler.config.lock_ttl)})
