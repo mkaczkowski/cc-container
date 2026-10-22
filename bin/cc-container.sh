@@ -1016,6 +1016,10 @@ cc-down() {
     return 0
   fi
   _cc_listening "${CC_PROXY_PORT}" && cc-proxy-down >/dev/null 2>&1 && echo "stopped:  proxy"
+  # A builder cc-container-build could not stop (an interrupted build, or a
+  # plain `container build`). A build still running in another terminal would
+  # be cut off, as the proxy already would cut it off.
+  _cc_builder_running && _cc_builder_stop && echo "stopped:  buildkit builder"
   _cc_sim_auto_down
   _cc_call_hook "${CC_POST_DOWN_HOOK}" CC_POST_DOWN_HOOK
   return 0
@@ -1192,7 +1196,36 @@ _cc_save_versions() {
     || { echo "cc-container-build: could not write ${CC_IMAGE_VERSIONS}" >&2; return 1; }
 }
 
+# Whether Apple container's BuildKit builder (the `buildkit` container) is up.
+# `container build` starts it and nothing stops it, so it holds its memory
+# (2 GB) until someone does; stopping keeps its build cache.
+_cc_builder_running() {
+  local json
+  json="$(container builder status --format json 2>/dev/null)" || return 1
+  printf '%s' "${json}" | jq -e '[.[] | if (.status | type) == "object" then .status.state else .status end]
+                                 | any(. == "running")' >/dev/null
+}
+
+_cc_builder_stop() {
+  local out
+  out="$(container builder stop 2>&1)" || {
+    echo "cc-container: could not stop the buildkit builder: ${out}; run: container builder stop" >&2
+    return 1
+  }
+}
+
+# Stops the builder afterwards unless it was already up: another build may
+# still be using it then.
 cc-container-build() {
+  local builder_was_up=0 rc
+  _cc_builder_running && builder_was_up=1
+  _cc_container_build "$@"
+  rc=$?
+  [ "${builder_was_up}" = 0 ] && _cc_builder_running && _cc_builder_stop
+  return "${rc}"
+}
+
+_cc_container_build() {
   cc-runtime-up || return 1
   _cc_disk_guard enforce || return 1
   _cc_proxy_collect || return 1
