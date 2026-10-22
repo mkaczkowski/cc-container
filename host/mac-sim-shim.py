@@ -565,18 +565,58 @@ def resolve_device(body, project):
                  default=project["defaults"].get("device"))
     if not name:
         raise Rejected("no device given and the project declares no default device")
-    out = subprocess.run(
-        ["xcrun", "simctl", "list", "devices", "available", "--json"],
-        capture_output=True, text=True, timeout=60,
-    )
-    devices = json.loads(out.stdout).get("devices", {})
-    matches = [d for runtime in devices.values() for d in runtime
-               if d.get("name") == name and d.get("isAvailable")]
+    matches = available_named(name)
     if not matches:
-        raise Rejected(f"no available simulator named {name!r}")
+        if name != project["defaults"].get("device"):
+            raise Rejected(f"no available simulator named {name!r}")
+        # The shared simulator is the project's, so it is recreated rather than
+        # refused: a wiped device set (Xcode, a cleanup tool, `simctl delete
+        # all`) would otherwise stop every build until someone made it by hand.
+        with _SHARED_SIM_LOCK:
+            matches = available_named(name) or [recreate_shared_device(name)]
     # Prefer an already-booted match so repeated calls stay on one device.
     booted = [d for d in matches if d.get("state") == "Booted"]
     return (booted or matches)[-1]["udid"]
+
+
+_SHARED_SIM_LOCK = threading.Lock()
+
+
+def available_named(name):
+    devices = json.loads(run_host(
+        ["xcrun", "simctl", "list", "devices", "available", "--json"], 60)).get("devices", {})
+    return [d for runtime in devices.values() for d in runtime
+            if d.get("name") == name and d.get("isAvailable")]
+
+
+def recreate_shared_device(name):
+    """Create the project's default simulator, which is gone, as the device type
+    of the same name on the newest iOS runtime that runs it. Its app is not
+    installed: the project's build installs it."""
+    types = json.loads(run_host(["xcrun", "simctl", "list", "devicetypes", "--json"], 60))
+    wanted = next((t for t in types.get("devicetypes", []) if t.get("name") == name), None)
+    if wanted is None:
+        raise Rejected(
+            f"no available simulator named {name!r}, and it cannot be recreated: "
+            f"{name!r} is not a simulator device type on this Mac. Create it by hand "
+            f"(`xcrun simctl create {shlex.quote(name)} <type> <runtime>`) or change "
+            f"defaults.device.")
+    runtimes = json.loads(run_host(["xcrun", "simctl", "list", "runtimes", "--json"], 60))
+    usable = [r for r in runtimes.get("runtimes", [])
+              if r.get("platform") == "iOS" and r.get("isAvailable")
+              and wanted["identifier"] in [d.get("identifier") for d in r.get("supportedDeviceTypes", [])]]
+    if not usable:
+        raise Rejected(
+            f"no available simulator named {name!r}, and no installed iOS runtime runs "
+            f"that device type, so it cannot be recreated. Install one in Xcode "
+            f"(Settings > Components).")
+    runtime = max(usable, key=lambda r: [int(part) for part in re.findall(r"\d+", r.get("version", "0"))])
+    log(f"the shared simulator {name!r} is gone: recreating it on {runtime['name']}")
+    udid = run_host(["xcrun", "simctl", "create", name,
+                     wanted["identifier"], runtime["identifier"]], 120)
+    if not UDID_RE.match(udid):
+        raise HostFailure(["xcrun", "simctl", "create"], 1, f"expected a UDID, got {udid!r}")
+    return {"udid": udid, "name": name, "state": "Shutdown", "isAvailable": True}
 
 
 def app_bundle_id(app_path):

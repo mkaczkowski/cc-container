@@ -30,6 +30,12 @@ projects declared, a request without `-p` acts on the project whose root holds
 the caller's checkout, and is refused from a checkout outside every root.
 `../examples/expo-monorepo.mac-sim.json` is a full worked example.
 
+`defaults.device` names the shared simulator, and also the simulator device
+type it is made from. When no simulator of that name exists (the device set was
+wiped by Xcode, a cleanup tool or `xcrun simctl delete all`), the shim recreates
+it on the newest iOS runtime that runs that type, and the next build installs
+the app on it.
+
 ## Usage from inside the container
 
 ```
