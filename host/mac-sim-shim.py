@@ -137,7 +137,7 @@ BUILTIN_VERBS = [
     "list", "booted", "runtimes", "boot", "shutdown", "open_simulator_ui",
     "install", "uninstall", "launch", "terminate", "screenshot", "openurl",
     "appearance", "logs", "xcodebuild", "project_command", "lock",
-    "sim_create", "sim_delete", "sim_list", "pull", "status", "browse",
+    "sim_create", "sim_delete", "sim_list", "pull", "status", "browse", "memory",
 ] + sorted(WATCH_VERBS) + sorted(DEVICE_VERBS)
 
 # Where `watch_build` puts its products, relative to the checkout.
@@ -154,9 +154,9 @@ DIRECT_VERBS = {"sim_create", "sim_delete", "sim_list", "pull", "status"}
 # simulator" into "act on the shared one". The guest checks this list before
 # sending such a field, so a stale shim is reported instead of obeyed wrongly.
 FEATURES = ["appearance", "locale", "pull", "sim", "progress", "status", "android",
-            "android_devices", "browse", "json", "watch", "device", "sim_type"]
+            "android_devices", "browse", "json", "watch", "device", "sim_type", "memory"]
 
-# The shape of the "data" object that status, lock, sim_list and android list
+# The shape of the "data" object that status, lock, sim_list, memory and android list
 # reply with, for `mac-sim <verb> --json`. Adding a field keeps the version;
 # renaming, removing or changing the meaning of one bumps it, and the change is
 # recorded in docs/MAC-SIM.md.
@@ -1932,6 +1932,25 @@ def bundler_data(name, port, serving):
     return data
 
 
+def host_memory():
+    """The Mac's memory, for a tool in the guest that shows it beside the guest's
+    own (a dashboard): total, and what a new process could get without swapping,
+    which is free, inactive (reclaimable cache) and speculative pages. Read-only
+    and claim-free: it describes the Mac, not a checkout."""
+    total = int(run_host(["sysctl", "-n", "hw.memsize"], 10))
+    out = run_host(["vm_stat"], 10)
+    page = re.search(r"page size of (\d+) bytes", out)
+    counts = [re.search(rf"^Pages {name}:\s+(\d+)", out, re.M)
+              for name in ("free", "inactive", "speculative")]
+    if not page or not all(counts):
+        raise HostFailure(["vm_stat"], 1, f"no page size or free, inactive and speculative "
+                                          f"pages in its output:\n{out}")
+    available = sum(int(c.group(1)) for c in counts) * int(page.group(1))
+    gb = 1024 ** 3
+    return (f"memory: {available / gb:.1f} GB available of {total / gb:.0f} GB",
+            {"total": total, "available": available})
+
+
 DIRECT = {"sim_create": sim_create, "sim_delete": sim_delete,
           "sim_list": sim_list, "pull": pull, "status": status}
 
@@ -2606,6 +2625,8 @@ class Handler(BaseHTTPRequestHandler):
                                f"{', '.join(sorted(ANDROID_VERBS))}")
             if verb == "lock":
                 return self._lock_verb(body)
+            if verb == "memory":
+                return self._memory()
             if verb in (ANDROID_DIRECT if platform == "android" else DIRECT_VERBS):
                 return self._direct(verb, body)
             argv, timeout, extra, project = build_command(verb, body, self.config)
@@ -2682,6 +2703,16 @@ class Handler(BaseHTTPRequestHandler):
                                     previous_owner.get("guest_workdir"))
                     else:
                         clear_owner(claim.name)
+
+    def _memory(self):
+        try:
+            stdout, data = host_memory()
+        except HostFailure as exc:
+            log(f"FAIL memory: {exc}")
+            return self._reply(200, {"verb": "memory", "exit_code": exc.code,
+                                     "stdout": "", "stderr": str(exc)})
+        return self._reply(200, {"verb": "memory", "exit_code": 0, "stdout": stdout,
+                                 "stderr": "", "data": with_schema(data)})
 
     def _lock_verb(self, body):
         """Inspect, hand back, or force-clear the claim. Never runs a subprocess

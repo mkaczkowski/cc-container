@@ -23,6 +23,7 @@ Built-in simulator verbs work for any project:
                                          # relative to it); a SQLite database
                                          # arrives as one consistent snapshot
   mac-sim openurl myapp://
+  mac-sim memory [--json]               # the Mac's memory: available of total
   mac-sim browse https://github.com/... # open in the Mac's browser (only the
                                          # https prefixes the host config allows)
   mac-sim appearance [light|dark]       # set, or print the current one
@@ -139,7 +140,7 @@ ANDROID_DEVICE = os.environ.get("MAC_SIM_ANDROID_DEVICE")
 BUILTINS = {"list", "booted", "runtimes", "boot", "shutdown", "gui", "install",
             "launch", "terminate", "uninstall", "openurl", "appearance", "screenshot", "logs",
             "build", "commands", "projects", "lock", "release", "reset", "sim", "pull",
-            "status", "android", "browse", "watch", "device"}
+            "status", "android", "browse", "watch", "device", "memory"}
 
 # `mac-sim android <verb>`: built in. Any other word after `android` is the
 # project command `android-<word>`.
@@ -1057,7 +1058,7 @@ def main():
 
     for name in ("list", "booted", "runtimes", "boot", "shutdown", "gui"):
         add(name)
-    for name in ("commands", "projects", "lock", "release", "status"):
+    for name in ("commands", "projects", "lock", "release", "status", "memory"):
         add(name).add_argument("--json", action="store_true",
                                help="print one JSON object instead of text")
     p = add("reset")
@@ -1247,6 +1248,11 @@ def main():
 
     if a.cmd == "gui":
         return emit(call({"verb": "open_simulator_ui"}))
+
+    if a.cmd == "memory":
+        require_feature("memory", "memory", health)
+        res = call({"verb": "memory"}, timeout=30)
+        return emit_json(res) if as_json else emit(res)
 
     if a.cmd == "browse":
         require_feature("browse", "browse")

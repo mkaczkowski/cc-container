@@ -46,6 +46,7 @@ mac-sim launch                            # the project's default bundle id
 mac-sim launch --locale pl                # relaunch in that language (pl, pl-PL)
 mac-sim openurl "myapp://"
 mac-sim browse https://github.com/o/r/pull/1  # open in the Mac's browser (allowlisted https only)
+mac-sim memory                            # the Mac's memory: available of total
 mac-sim appearance dark                   # light|dark; no arg prints the current one
 mac-sim screenshot .mac-sim/x.png
 mac-sim logs --last 2m --lines 300        # the app's own process only
@@ -118,6 +119,13 @@ The default (no `browse` block) is GitHub and Notion; `[]` turns the verb off.
 Narrow a prefix to your own account (`https://github.com/<you>/`) to keep a guest
 agent from opening anything else there. Any page under an allowed prefix can
 still be opened, with whatever query string the guest puts in the URL.
+
+### The Mac's memory
+
+`mac-sim memory` prints how much memory the Mac has and how much a new process
+could get (free, inactive and speculative pages, from `vm_stat`), for a tool in
+the container that shows it beside the guest's own (the train dashboard's
+header). It reads nothing project-specific and takes no claim.
 
 ### Forwarding a console port to the container
 
@@ -658,6 +666,7 @@ mac-sim projects --json          # same as commands --json
 mac-sim android status --json    # also with -d NAME
 mac-sim android list --json
 mac-sim android lock --json      # release and reset too
+mac-sim memory --json
 ```
 
 Exit codes are the same as without `--json`: `status --json` exits 0 only when
@@ -713,6 +722,8 @@ null when no emulator holds the port) and `app` as `{"package", "installed",
 `release` and `reset` answer `{"schemaVersion", "lock", "action", "stopped"}`,
 where `stopped` is the command a reset killed (`{"verb", "pid", "elapsed",
 "workdir"}`) or null.
+
+`memory` answers `{"schemaVersion", "total", "available"}`, both in bytes.
 
 `sim list` answers `{"schemaVersion", "project", "max", "simulators": [...]}`,
 one entry per private simulator, sorted by name: `{"name", "state", "udid",

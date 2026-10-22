@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- **`mac-sim memory`: the Mac's memory from the container.** It prints how much
+  memory the Mac has and how much a new process could get (`--json` gives
+  `{"total", "available"}` in bytes), so a dashboard running in the container
+  can show the Mac's memory beside its own. Needs a shim restart
+  (`cc-sim-down && cc-sim-up`); an older shim is refused with that hint.
 - **The BuildKit builder no longer lingers after a build.** `container build`
   starts Apple container's `buildkit` builder and leaves it holding 2 GB until
   someone stops it. `cc-container-build` now stops it when the build ends
