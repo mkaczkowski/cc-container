@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- **The BuildKit builder no longer lingers after a build.** `container build`
+  starts Apple container's `buildkit` builder and leaves it holding 2 GB until
+  someone stops it. `cc-container-build` now stops it when the build ends
+  (unless it was already up, so another build keeps it), and `cc-down` stops a
+  leftover one along with the host helpers. Stopping keeps the build cache.
+- **The shim refuses an unknown key in an `android` block.** A device entry
+  with `serial` instead of `console_port` used to be ignored and landed the
+  emulator on 5554; it now fails at startup naming the key and the allowed
+  ones. Needs a shim restart (`cc-sim-down && cc-sim-up`).
 - **The shim recreates a missing shared simulator.** A request for the
   project's `defaults.device` that finds no simulator of that name (a wiped
   device set) creates it from the device type of the same name on the newest

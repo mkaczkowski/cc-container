@@ -292,6 +292,20 @@ class Config:
         return max(held, key=lambda p: len(p["root"].parts), default=None)
 
 
+EMULATOR_KEYS = {"avd", "console_port", "port", "emulator_args"}
+ANDROID_KEYS = {"sdk", "package", "java_home", "port", "emulator_args", "boot_timeout",
+                "devices", "default", "avd", "console_port"}
+
+
+def reject_unknown_keys(where, raw, allowed):
+    """Refuse a key the shim does not read (`//` comments aside), so a typo such
+    as `serial` for `console_port` fails at startup instead of being ignored."""
+    unknown = sorted(k for k in raw if k not in allowed and not k.startswith("//"))
+    if unknown:
+        raise ValueError(f"{where}: unknown key(s) {', '.join(map(repr, unknown))}; "
+                         f"allowed: {', '.join(sorted(allowed))}")
+
+
 def parse_emulator(name, dname, raw, base):
     """One emulator: its AVD and the console port that fixes its adb serial."""
     avd = raw.get("avd")
@@ -321,6 +335,7 @@ def parse_android(name, raw, defaults):
     (sdk, java_home, package, port, emulator_args) are their defaults."""
     if not isinstance(raw, dict):
         raise ValueError(f"project {name}: 'android' must be an object")
+    reject_unknown_keys(f"project {name}: android", raw, ANDROID_KEYS)
     sdk = Path(os.path.expanduser(raw.get("sdk", "") or "")).resolve()
     if not raw.get("sdk") or not (sdk / "platform-tools" / "adb").exists():
         raise ValueError(f"project {name}: android.sdk must be an Android SDK root "
@@ -339,6 +354,9 @@ def parse_android(name, raw, defaults):
         for dname, draw in raw["devices"].items():
             if not SIM_NAME_RE.match(dname):
                 raise ValueError(f"project {name}: android device name invalid: {dname!r}")
+            if not isinstance(draw, dict):
+                raise ValueError(f"project {name}: android device {dname!r} must be an object")
+            reject_unknown_keys(f"project {name}: android device {dname!r}", draw, EMULATOR_KEYS)
             devices[dname] = parse_emulator(name, dname, draw, base)
         default = raw.get("default", next(iter(devices)))
         if default not in devices:
