@@ -32,6 +32,8 @@
 #
 # Tip: mounting a host directory at the SAME absolute path it has on the Mac
 # makes tooling that refers to it by absolute path work unchanged in the guest.
+# Brace variables there: zsh reads "$DIR:$DIR:ro" as $DIR with the :r modifier
+# and drops the :ro. Write "${DIR}:${DIR}:ro".
 #
 # CC_EXTRA_VOLUME_ARGS=(
 #   --volume "$HOME/Documents/Notes:$HOME/Documents/Notes"       # read-write

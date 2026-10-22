@@ -620,6 +620,10 @@ entries in `config.sh` — one `--volume` each, `:ro` unless the agent must writ
 back. Mounting a host path at the *same absolute path* it has on the Mac makes
 tooling that refers to it absolutely work unchanged in the guest.
 
+`config.sh` is sourced by zsh, where `$VAR:r` (and `:h`, `:t`, `:e`, ...) is a
+modifier, so `"$DIR:$DIR:ro"` silently loses its `:ro` and mounts read-write at
+a wrong path. Brace the name: `"${DIR}:${DIR}:ro"`.
+
 ### Subscription-only mode
 
 Set `CC_SUBSCRIPTION_ONLY=1` in `config.sh` to make sure every session bills a
