@@ -491,6 +491,32 @@ _cc_sim_ensure_bridge() {
   return 1
 }
 
+# The Mac must route the bridge subnet through the bridge itself. Something (a
+# VPN, a network change) can leave a route for it on another interface, en0 as
+# a rule; mac-sim still works then (the guest calls the Mac), but nothing on the
+# Mac reaches a guest, so a train console's relay times out. Checked, not
+# repaired: fixing it needs sudo, so this prints the two commands that do.
+_cc_sim_check_route() {
+  local host bridge mask out_if prefix net
+  host="$(_cc_sim_host)"
+  bridge="$(ifconfig 2>/dev/null | awk -v a="${host}" '/^[a-z]/{i=$1; sub(":$","",i)} $1=="inet" && $2==a {print i}')"
+  [ -n "${bridge}" ] || return 0  # no bridge yet: _cc_sim_ensure_bridge reports that
+  mask="$(ifconfig "${bridge}" | awk -v a="${host}" '$1=="inet" && $2==a {print $4}')"
+  out_if="$(route -n get "${host%.*}.2" 2>/dev/null | awk '$1=="interface:" {print $2}')"
+  [ "${out_if}" = "${bridge}" ] && return 0
+  prefix=0
+  local m=$((mask)) i n=0 a b c d
+  for i in $(seq 31 -1 0); do (( (m >> i) & 1 )) && prefix=$((prefix + 1)); done
+  IFS=. read -r a b c d <<< "${host}"
+  n=$(( ((a << 24) | (b << 16) | (c << 8) | d) & m ))
+  net="$(( (n >> 24) & 255 )).$(( (n >> 16) & 255 )).$(( (n >> 8) & 255 )).$(( n & 255 ))/${prefix}"
+  echo "cc-sim-up: the Mac routes ${net} through ${out_if:-nothing}, not ${bridge}:" >&2
+  echo "  nothing on the Mac can reach a container (a train console's relay times out). Fix it with:" >&2
+  [ -n "${out_if}" ] && echo "    sudo route -n delete -net ${net} -interface ${out_if}" >&2
+  echo "    sudo route -n add -net ${net} -interface ${bridge}" >&2
+  return 0
+}
+
 cc-sim-up() {
   if ! _cc_sim_configured; then
     echo "cc-sim-up: no config at ${CC_SIM_CONFIG}" >&2
@@ -499,7 +525,7 @@ cc-sim-up() {
   fi
   local port; port="$(_cc_sim_port)"
   [ -n "${port}" ] || { echo "cc-sim-up: cannot read listen.port from ${CC_SIM_CONFIG}" >&2; return 1; }
-  _cc_listening "${port}" && return 0
+  if _cc_listening "${port}"; then _cc_sim_check_route; return 0; fi
   _cc_sim_ensure_bridge || return 1
   # The token is shared by file, so the guest never has to be told a secret it
   # could log; it is generated once and reused across restarts.
@@ -515,6 +541,7 @@ cc-sim-up() {
   _cc_listening "${port}" \
     || { echo "cc-sim-up: shim failed to start; see ${CC_SIM_LOG}" >&2; return 1; }
   echo "mac-sim: shim listening on $(_cc_sim_host):${port}"
+  _cc_sim_check_route
 }
 
 cc-sim-down() {
