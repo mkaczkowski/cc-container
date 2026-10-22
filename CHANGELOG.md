@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- **The shim recreates a missing shared simulator.** A request for the
+  project's `defaults.device` that finds no simulator of that name (a wiped
+  device set) creates it from the device type of the same name on the newest
+  iOS runtime that runs it, instead of refusing every build with "no available
+  simulator named ...". Needs a shim restart (`cc-sim-down && cc-sim-up`).
 - **`mac-sim device`: one physical iPhone.** A project that declares a `device`
   block gets `mac-sim device list | install | launch [-- args] | terminate |
   pull | lock | release | reset`, and `device run` for a declared `device-run`
