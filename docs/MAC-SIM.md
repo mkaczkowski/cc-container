@@ -136,6 +136,24 @@ and a port in the range can be used:
 }
 ```
 
+#### When the relay times out
+
+`console-forward: the console does not answer on <guest>:<port> ... timed out`
+with the console running means the Mac cannot reach any container, usually because
+a route for the vmnet subnet (`192.168.64.0/24`) sits on another interface (`en0`
+after a VPN connects or the network changes). Binding the relay's source address
+to the bridge does not override that route. `cc-sim-up` checks for it and prints
+the fix; by hand:
+
+```sh
+route -n get 192.168.64.2 | grep interface        # should be the bridge (bridge100)
+sudo route -n delete -net 192.168.64.0/24 -interface en0
+sudo route -n add -net 192.168.64.0/24 -interface bridge100
+```
+
+Then start the console again. The fix lasts until something puts the route back
+(a reboot, a network change, the VPN reconnecting).
+
 ## Worktrees
 
 Every command runs in **the checkout you call it from**, so a session started
