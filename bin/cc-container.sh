@@ -494,15 +494,16 @@ _cc_sim_ensure_bridge() {
 # The Mac must route the bridge subnet through the bridge itself. Something (a
 # VPN, a network change) can leave a route for it on another interface, en0 as
 # a rule; mac-sim still works then (the guest calls the Mac), but nothing on the
-# Mac reaches a guest, so a train console's relay times out. Checked, not
-# repaired: fixing it needs sudo, so this prints the two commands that do.
+# Mac reaches a guest, so a train console's relay times out. The repair needs
+# root: it runs through `sudo -n`, which a sudoers rule can allow for exactly
+# these two commands (docs/MAC-SIM.md), and otherwise prints them to run by hand.
 _cc_sim_check_route() {
   local host bridge mask out_if prefix net
   host="$(_cc_sim_host)"
   bridge="$(ifconfig 2>/dev/null | awk -v a="${host}" '/^[a-z]/{i=$1; sub(":$","",i)} $1=="inet" && $2==a {print i}')"
   [ -n "${bridge}" ] || return 0  # no bridge yet: _cc_sim_ensure_bridge reports that
   mask="$(ifconfig "${bridge}" | awk -v a="${host}" '$1=="inet" && $2==a {print $4}')"
-  out_if="$(route -n get "${host%.*}.2" 2>/dev/null | awk '$1=="interface:" {print $2}')"
+  out_if="$(_cc_route_if "${host%.*}.2")"
   [ "${out_if}" = "${bridge}" ] && return 0
   prefix=0
   local m=$((mask)) i n=0 a b c d
@@ -510,12 +511,22 @@ _cc_sim_check_route() {
   IFS=. read -r a b c d <<< "${host}"
   n=$(( ((a << 24) | (b << 16) | (c << 8) | d) & m ))
   net="$(( (n >> 24) & 255 )).$(( (n >> 16) & 255 )).$(( (n >> 8) & 255 )).$(( n & 255 ))/${prefix}"
+  local del=(/sbin/route -n delete -net "${net}" -interface "${out_if}")
+  local add=(/sbin/route -n add -net "${net}" -interface "${bridge}")
+  if { [ -z "${out_if}" ] || sudo -n "${del[@]}" >/dev/null 2>&1; } \
+     && sudo -n "${add[@]}" >/dev/null 2>&1 \
+     && [ "$(_cc_route_if "${host%.*}.2")" = "${bridge}" ]; then
+    echo "cc-sim-up: rerouted ${net} from ${out_if:-nothing} to ${bridge}" >&2
+    return 0
+  fi
   echo "cc-sim-up: the Mac routes ${net} through ${out_if:-nothing}, not ${bridge}:" >&2
   echo "  nothing on the Mac can reach a container (a train console's relay times out). Fix it with:" >&2
-  [ -n "${out_if}" ] && echo "    sudo route -n delete -net ${net} -interface ${out_if}" >&2
-  echo "    sudo route -n add -net ${net} -interface ${bridge}" >&2
+  [ -n "${out_if}" ] && echo "    sudo ${del[*]}" >&2
+  echo "    sudo ${add[*]}" >&2
+  echo "  A sudoers rule for these two lets cc-sim-up run them itself (docs/MAC-SIM.md)." >&2
   return 0
 }
+_cc_route_if() { route -n get "$1" 2>/dev/null | awk '$1=="interface:" {print $2}'; }
 
 cc-sim-up() {
   if ! _cc_sim_configured; then

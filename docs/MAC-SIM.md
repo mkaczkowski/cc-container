@@ -142,8 +142,7 @@ and a port in the range can be used:
 with the console running means the Mac cannot reach any container, usually because
 a route for the vmnet subnet (`192.168.64.0/24`) sits on another interface (`en0`
 after a VPN connects or the network changes). Binding the relay's source address
-to the bridge does not override that route. `cc-sim-up` checks for it and prints
-the fix; by hand:
+to the bridge does not override that route. By hand:
 
 ```sh
 route -n get 192.168.64.2 | grep interface        # should be the bridge (bridge100)
@@ -153,6 +152,22 @@ sudo route -n add -net 192.168.64.0/24 -interface bridge100
 
 Then start the console again. The fix lasts until something puts the route back
 (a reboot, a network change, the VPN reconnecting).
+
+`cc-sim-up` (so every `ccup`) checks the route and runs those two commands
+through `sudo -n`; without a rule allowing them it prints them instead. The rule
+allows exactly these commands, no other route, interface or subnet:
+
+```sh
+cat > /tmp/cc-bridge-route <<'EOF'
+%admin ALL=(root) NOPASSWD: /sbin/route -n delete -net 192.168.64.0/24 -interface en0
+%admin ALL=(root) NOPASSWD: /sbin/route -n add -net 192.168.64.0/24 -interface bridge100
+EOF
+sudo visudo -cf /tmp/cc-bridge-route \
+  && sudo install -m 0440 -o root -g wheel /tmp/cc-bridge-route /etc/sudoers.d/cc-bridge-route
+```
+
+Interfaces named otherwise (`bridge101`, a route on `en1`) fall outside the rule,
+so `cc-sim-up` prints the commands with those names instead.
 
 ## Worktrees
 
