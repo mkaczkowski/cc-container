@@ -45,6 +45,8 @@
 # CC_SKIP_PERMISSIONS=1
 # Name of the long-lived shared container used by cc-up / cc-attach.
 # CC_SESSION_NAME=cc-session
+# The command cc-attach runs, as argv; claude's arguments follow it.
+# CC_ATTACH_COMMAND=(claude)
 # Named volume mounted as the container's home (/root). Only one running
 # container can hold it; a profile running beside the session needs its own.
 # CC_HOME_VOLUME=cc-home

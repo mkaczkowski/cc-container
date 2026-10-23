@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- **`CC_ATTACH_COMMAND`: the command `cc-attach` runs.** It defaults to
+  `(claude)`; a profile can set a wrapper that passes claude's arguments on,
+  e.g. `CC_ATTACH_COMMAND=(trainyard claude)`, and `cc-profile <name> attach`
+  runs that instead.
 - **`mac-sim memory`: the Mac's memory from the container.** It prints how much
   memory the Mac has and how much a new process could get (`--json` gives
   `{"total", "available"}` in bytes), so a dashboard running in the container

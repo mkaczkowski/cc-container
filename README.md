@@ -522,6 +522,8 @@ How it works:
   so the two builds never share a `:base` tag) and `CC_IMAGE_OVERLAY` to its
   Dockerfile. `cc-profile <name> build|upgrade` pins its agent versions in
   their own record, so upgrading the session's image never changes it.
+- `CC_ATTACH_COMMAND` replaces the `claude` that `attach` runs with a wrapper
+  that passes claude's arguments on: `CC_ATTACH_COMMAND=(trainyard claude)`.
 - The proxy, the mac-sim shim and the hooks are host-wide. `down` on either
   container leaves them running while the other is up.
 

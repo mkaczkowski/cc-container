@@ -85,6 +85,12 @@ CC_SUBSCRIPTION_ONLY="${CC_SUBSCRIPTION_ONLY:-0}"
 # Long-lived shared session (cc-up / cc-attach).
 CC_SESSION_NAME="${CC_SESSION_NAME:-cc-session}"
 
+# The command cc-attach runs in the session, as argv; claude's arguments follow
+# it. A wrapper that passes them on to claude goes here, e.g. in a profile:
+#   CC_ATTACH_COMMAND=(trainyard claude)
+CC_ATTACH_COMMAND=(${CC_ATTACH_COMMAND+"${CC_ATTACH_COMMAND[@]}"})
+[ "${#CC_ATTACH_COMMAND[@]}" -gt 0 ] || CC_ATTACH_COMMAND=(claude)
+
 # Free space on the Mac's data volume, in GB. The VM disks, the home volumes,
 # the images and every mounted checkout all live there, and when it fills, a
 # running guest's root file system hits I/O errors and turns read-only until
@@ -824,7 +830,7 @@ cc-attach() {
   # to herdr's host-side process detection.
   _cc_awake env HERDR_AGENT=claude container exec "${tty_args[@]}" --env TERM \
     --workdir "${workdir}" \
-    "${CC_SESSION_NAME}" claude ${default_flags+"${default_flags[@]}"} "$@"
+    "${CC_SESSION_NAME}" "${CC_ATTACH_COMMAND[@]}" ${default_flags+"${default_flags[@]}"} "$@"
 }
 
 # The pi counterpart of cc-attach. Both agents share the container and the
