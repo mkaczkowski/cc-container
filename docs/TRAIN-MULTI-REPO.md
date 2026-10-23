@@ -8,8 +8,8 @@ bound to a single Gymlog checkout.
 
 ## Where things stand
 
-`cc-train` is not part of this repo. It is a profile
-(`~/.config/cc-container/profiles/train.sh`, based on
+`cc-train` is a profile (`~/.config/cc-container/profiles/train.sh`; the
+current version is `config/profile.train.example.sh`, based on
 `config/profile.runner.example.sh`) with its own home volume (`train-home`),
 16g / 8 CPUs, subscription-only, no extra mounts, no MCP or pi config, and the
 mac-sim bridge kept. Compared with the shared `cc-session` it narrows the

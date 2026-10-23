@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- `config/profile.train.example.sh`: a profile for a trainyard train. It
+  mounts every repo in trainyard's `machine.json` and attaches through
+  `trainyard claude`.
 - **`CC_ATTACH_COMMAND`: the command `cc-attach` runs.** It defaults to
   `(claude)`; a profile can set a wrapper that passes claude's arguments on,
   e.g. `CC_ATTACH_COMMAND=(trainyard claude)`, and `cc-profile <name> attach`

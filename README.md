@@ -551,6 +551,12 @@ it on the runner's home volume, separately from `cc-home`, so logging out of
 one never signs out the other. With `CC_SUBSCRIPTION_ONLY=1` only a Claude.ai
 login works there.
 
+`config/profile.train.example.sh` is the runner profile set up for a
+trainyard train: it mounts every repo listed under `"repos"` in
+`~/.config/trainyard/machine.json`, wherever `up` runs from, and `attach` runs
+`trainyard claude`. Copy it to `profiles/train.sh`; the image needs `trainyard`
+on its `PATH`.
+
 ## Configuration
 
 Everything user-specific lives outside the repo, mostly in
@@ -566,7 +572,7 @@ the files every setup needs. The rest are opt-in, and you create them yourself.
 | `pi/` | no | Global pi config ([Running pi](#running-pi-beside-claude-code)); mounted only if it exists when a container starts |
 | `mac-sim.json` | no | The opt-in Xcode (and Android emulator) bridge, from `config/mac-sim.example.json` ([Driving the Mac's Xcode toolchain](#driving-the-macs-xcode-toolchain-from-the-guest)) |
 | `Dockerfile.local` | no | Your own layer on top of the image ([Adding tools](#adding-tools-to-the-image)) |
-| `profiles/<name>.sh` | no | A second container's settings, from `config/profile.example.sh` or `config/profile.runner.example.sh` ([Profiles](#profiles-a-second-isolated-container)) |
+| `profiles/<name>.sh` | no | A second container's settings, from `config/profile.example.sh`, `config/profile.runner.example.sh` or `config/profile.train.example.sh` ([Profiles](#profiles-a-second-isolated-container)) |
 
 Nothing else in that directory is read automatically. A directory of your own
 guest tools needs a `CC_EXTRA_VOLUME_ARGS` entry in `config.sh` (see
