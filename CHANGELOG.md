@@ -9,13 +9,21 @@
   subscription-only docs now say what the guard always did: it refuses
   Anthropic, AWS and Claude Code credentials, not the keys of pi's other
   providers.
+- **The train profile's container follows trainyard's main.** The
+  `machine.json` that `profile.train.example.sh` writes into a new home volume
+  now sets `engine.follow` to the mounted trainyard checkout, as the Mac's
+  does, so a merged engine change reaches the container's trains without a
+  release (before, the container ran the repos' pinned engine and refused
+  params that main already had).
 - **`ccdown` gives the home volume's freed space back to the Mac.** A volume
   is a sparse ext4 image that deleting files inside never shrinks (a train's
   home held 28 GB on the Mac for 16 GB in use). `cc-down` now runs `fstrim` on
   it from a throwaway container with no network and only the volume mounted,
   so `CAP_SYS_ADMIN` never reaches an agent container; it skips the trim while
-  a one-off `ccrun` still holds the volume. `cc-trim [volume]` (or
-  `cc-profile <name> trim`) does it by hand.
+  a one-off `ccrun` still holds the volume. A failed trim is a warning, not a
+  failed `cc-down`, and a start right after `cc-down` waits for the helper to
+  release the volume. `cc-trim [volume]` (or `cc-profile <name> trim`) does it
+  by hand.
 - **Builds no longer leave old images and a growing build cache behind.**
   Once no container exists (after `cc-container-build`, or at `cc-down`),
   dangling images (those a rebuild untagged, and any other untagged image on

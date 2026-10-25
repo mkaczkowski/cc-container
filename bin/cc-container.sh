@@ -671,6 +671,7 @@ _cc_run() {
   cc-runtime-up || return 1
   _cc_disk_guard enforce || return 1
   _cc_image_present || return 1
+  _cc_trim_wait || return 1
   _cc_proxy_collect || return 1
   _cc_sim_auto_up || return 1
   _cc_call_hook "${CC_PRE_RUN_HOOK}" CC_PRE_RUN_HOOK || return 1
@@ -814,6 +815,7 @@ cc-up() {
   cc-runtime-up || return 1
   _cc_disk_guard enforce || return 1
   _cc_image_present || return 1
+  _cc_trim_wait || return 1
   _cc_proxy_collect || return 1
   _cc_sim_auto_up || return 1
   _cc_call_hook "${CC_PRE_RUN_HOOK}" CC_PRE_RUN_HOOK || return 1
@@ -1147,14 +1149,12 @@ cc-trim() {
     echo "cc-trim: volume ${vol} is held by: ${holders}. Trim it after $(_cc_cmd down cc-down), or once a stopped holder is deleted (container delete <id>)." >&2
     return 1
   fi
-  # Unchecked, a missing local image sends container run to Docker Hub, whose
-  # 401 hides the real cause.
-  container image inspect "${CC_CONTAINER_IMAGE}" >/dev/null 2>&1 || {
-    echo "cc-trim: the helper runs ${CC_CONTAINER_IMAGE}, which is not built; run $(_cc_cmd build cc-container-build)" >&2
-    return 1
-  }
+  # The helper runs the agent image: unchecked, a missing one sends container
+  # run to Docker Hub, whose 401 hides the real cause.
+  _cc_image_present || return 1
   before="$(_cc_disk_usage "${img}")" || return 1
-  out="$(container run --rm --progress none --network none --cap-add CAP_SYS_ADMIN \
+  out="$(container run --rm --progress none --name "$(_cc_trim_name "${vol}")" \
+    --network none --cap-add CAP_SYS_ADMIN \
     --volume "${vol}:/trim" --entrypoint fstrim "${CC_CONTAINER_IMAGE}" -v /trim 2>&1)" || {
     echo "cc-trim: fstrim of volume ${vol} failed (helper image ${CC_CONTAINER_IMAGE}): ${out}" >&2
     return 1
@@ -1163,35 +1163,58 @@ cc-trim() {
   echo "trimmed:  ${vol}, ${before} -> ${after} on the Mac"
 }
 
+_cc_trim_name() { echo "cc-trim-$1"; }
+
+# The trim helper holds the volume for a VM boot plus fstrim, so a start right
+# after cc-down (a train's idle stop, then a new task) waits for it instead of
+# failing on a volume in use.
+_cc_trim_wait() {
+  local name i=0
+  name="$(_cc_trim_name "${CC_HOME_VOLUME}")"
+  while container inspect "${name}" 2>/dev/null | jq -e 'length > 0' >/dev/null 2>&1; do
+    if [ "${i}" -ge 120 ]; then
+      echo "cc-container: ${name} still holds ${CC_HOME_VOLUME} after 120s; check it with 'container logs ${name}', remove it with 'container delete --force ${name}'" >&2
+      return 1
+    fi
+    [ "${i}" = 0 ] && echo "waiting for ${name} to release ${CC_HOME_VOLUME}..."
+    sleep 1
+    i=$((i + 1))
+  done
+}
+
+# Trimming and reclaiming only free disk: when they fail, cc-down says so but
+# still reports the stop as done, since the session is gone either way (a
+# trainyard host stop would otherwise count as failed).
 cc-down() {
-  local rc=0 img holders
+  local img holders
   _cc_spin "stopping ${CC_SESSION_NAME}" _cc_session_remove
   echo "${CC_SESSION_NAME} removed."
-  # A one-off ccrun on the same volume still holds it: the next cc-down trims.
-  if img="$(_cc_volume_image "${CC_HOME_VOLUME}")" && holders="$(_cc_volume_holders "${img}")"; then
-    if [ -n "${holders}" ]; then
-      echo "trim:     skipped, ${CC_HOME_VOLUME} is still held by ${holders}"
-    else
-      cc-trim "${CC_HOME_VOLUME}" || rc=1
-    fi
+  if ! container volume inspect "${CC_HOME_VOLUME}" >/dev/null 2>&1; then
+    echo "trim:     skipped, no volume ${CC_HOME_VOLUME} yet"
+  elif ! img="$(_cc_volume_image "${CC_HOME_VOLUME}")" || ! holders="$(_cc_volume_holders "${img}")"; then
+    echo "warning:  ${CC_HOME_VOLUME} was not trimmed (see above); run $(_cc_cmd trim cc-trim) later" >&2
+  elif [ -n "${holders}" ]; then
+    # A one-off ccrun on the same volume: the next cc-down trims.
+    echo "trim:     skipped, ${CC_HOME_VOLUME} is still held by ${holders}"
   else
-    rc=1
+    cc-trim "${CC_HOME_VOLUME}" \
+      || echo "warning:  ${CC_HOME_VOLUME} was not trimmed (see above); run $(_cc_cmd trim cc-trim) later" >&2
   fi
   # Leave the host-side helpers up if anything else might still need them: a
   # one-off `ccrun` in another terminal would lose its network otherwise.
   if [ "$(_cc_other_containers)" -gt 0 ] 2>/dev/null; then
     echo "host helpers: left running (other containers still up)"
-    return "${rc}"
+    return 0
   fi
   _cc_listening "${CC_PROXY_PORT}" && cc-proxy-down >/dev/null 2>&1 && echo "stopped:  proxy"
   # A builder cc-container-build could not stop (an interrupted build, or a
   # plain `container build`). A build still running in another terminal would
   # be cut off, as the proxy already would cut it off.
   _cc_builder_running && _cc_builder_stop && echo "stopped:  buildkit builder"
-  _cc_build_reclaim || rc=1
+  _cc_build_reclaim || echo "warning:  build leftovers were not reclaimed (see above)" >&2
   _cc_sim_auto_down
   _cc_call_hook "${CC_POST_DOWN_HOOK}" CC_POST_DOWN_HOOK
-  return "${rc}"
+  return 0
 }
 
 cc-status() {
