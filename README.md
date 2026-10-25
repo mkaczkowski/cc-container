@@ -68,7 +68,8 @@ own image layer) need files `install.sh` does not create; see
 | `cc-status` | `ccst` | Runtime, proxy, shim, and container state |
 | `cc-exec` | | Run one command (argv, not a shell string) in the shared container, from a script |
 | `cc-profile` | | Run a verb against a [profile](#profiles-a-second-isolated-container): `cc-profile <name> up` |
-| `cc-down` | `ccdown` | Stop and remove the shared container |
+| `cc-down` | `ccdown` | Stop and remove the shared container, then trim its home volume |
+| `cc-trim` | — | Give a home volume's freed space back to the Mac (`cc-trim [volume]`) |
 | `cc-container` | `ccrun` | One-off throwaway session (`--rm`) |
 | `pi-container` | `pirun` | One-off throwaway pi session (`--rm`) |
 | `cc-shell` | `ccsh` | One-off throwaway bash shell |
@@ -593,7 +594,12 @@ Outside it:
   the terminfo entries `ccxs` and `ccsh` copy from the Mac (`~/.terminfo`). It
   survives `ccdown` and rebuilds. Deleting it (`container volume delete
   cc-home`) means logging in and redoing those steps. `CC_HOME_VOLUME` names
-  another volume; each profile should have its own.
+  another volume; each profile should have its own. The volume is a sparse
+  image on the Mac that files deleted inside it never shrink, so `ccdown`
+  trims it (`fstrim`, which needs `CAP_SYS_ADMIN`) from a throwaway container
+  with no network that mounts only the volume; the agent containers never get
+  that capability. `cc-trim` does it by hand, e.g. after one-off `ccrun`
+  sessions.
 
 On a new Mac, copy `~/.config/cc-container/` from the old one, run `./install.sh`
 (it keeps existing files), `cc-container-build`, and log in again: the

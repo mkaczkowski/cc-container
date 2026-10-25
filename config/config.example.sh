@@ -17,6 +17,9 @@
 # file systems read-only. CC_DISK_MIN_GB=0 turns the refusal off.
 # CC_DISK_MIN_GB=10
 # CC_DISK_WARN_GB=25
+# drop deletes the buildkit builder and its layer cache once no container
+# exists (after a build, or at cc-down); keep holds it for faster rebuilds.
+# CC_BUILD_CACHE=drop
 
 # --- network -----------------------------------------------------------------
 # auto | on | off. `auto` uses the host proxy only if `cc-doctor` found that

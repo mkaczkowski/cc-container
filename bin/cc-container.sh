@@ -100,6 +100,12 @@ CC_ATTACH_COMMAND=(${CC_ATTACH_COMMAND+"${CC_ATTACH_COMMAND[@]}"})
 CC_DISK_WARN_GB="${CC_DISK_WARN_GB:-25}"
 CC_DISK_MIN_GB="${CC_DISK_MIN_GB:-10}"
 
+# drop | keep. The buildkit builder's layer cache grows with every build (9 GB
+# was seen) and nothing caps it. `drop` deletes the builder with its cache once
+# no container exists (after a build, or at cc-down), so the next build starts
+# cold; `keep` keeps it for faster rebuilds.
+CC_BUILD_CACHE="${CC_BUILD_CACHE:-drop}"
+
 # The named volume mounted as the container's home (/root): both agents'
 # logins, settings and caches. Only one running container can hold a named
 # volume, so a profile that runs beside the shared session needs its own.
@@ -902,13 +908,14 @@ cc-exec() {
 cc-profile() {
   local name="${1:-}" verb="${2:-}" fn
   if [ -z "${name}" ] || [ -z "${verb}" ]; then
-    echo "cc-profile: usage: cc-profile <name> <up|down|status|attach|pi|shell|exec|run|build|upgrade|doctor> [args...]" >&2
+    echo "cc-profile: usage: cc-profile <name> <up|down|trim|status|attach|pi|shell|exec|run|build|upgrade|doctor> [args...]" >&2
     return 1
   fi
   shift 2
   case "${verb}" in
     up)      fn=cc-up ;;
     down)    fn=cc-down ;;
+    trim)    fn=cc-trim ;;
     status)  fn=cc-status ;;
     attach)  fn=cc-attach ;;
     pi)      fn=pi-attach ;;
@@ -918,7 +925,7 @@ cc-profile() {
     build)   fn=cc-container-build ;;
     upgrade) fn=cc-container-upgrade ;;
     doctor)  fn=cc-doctor ;;
-    *) echo "cc-profile: unknown verb '${verb}'; use up, down, status, attach, pi, shell, exec, run, build, upgrade or doctor" >&2
+    *) echo "cc-profile: unknown verb '${verb}'; use up, down, trim, status, attach, pi, shell, exec, run, build, upgrade or doctor" >&2
        return 1 ;;
   esac
   local sh flags=() repo="${CC_CONTAINER_REPO}"
@@ -1012,23 +1019,103 @@ _cc_session_remove() {
   container delete "${CC_SESSION_NAME}" 2>/dev/null
 }
 
+# The volume's image file on the Mac.
+_cc_volume_image() {
+  local out img
+  out="$(container volume inspect "$1" 2>&1)" || {
+    echo "cc-container: no volume named '$1' ('container volume list' shows them): ${out}" >&2
+    return 1
+  }
+  img="$(printf '%s' "${out}" | jq -r '.[0].configuration.source // empty')"
+  [ -n "${img}" ] || {
+    echo "cc-container: container volume inspect $1 gave no image path: ${out}" >&2
+    return 1
+  }
+  printf '%s\n' "${img}"
+}
+
+# Containers, running or stopped, that mount the volume image $1: a stopped one
+# still holds it, and the runtime refuses any other container while it does.
+_cc_volume_holders() {
+  local json
+  json="$(container list -a --format json)" || {
+    echo "cc-container: cannot list containers to see what holds ${1}" >&2
+    return 1
+  }
+  printf '%s' "${json}" | jq -r --arg img "$1" \
+    '[.[] | select(any(.configuration.mounts[]?; .source == $img))
+          | .configuration.id // .id] | join(" ")'
+}
+
+# What the image takes on the Mac's disk, not its apparent size.
+_cc_disk_usage() {
+  local out
+  out="$(du -h "$1" 2>&1)" || {
+    echo "cc-container: cannot read the size of $1: ${out}" >&2
+    return 1
+  }
+  printf '%s\n' "${out%%[[:space:]]*}"
+}
+
+# A home volume is a sparse ext4 image on the Mac, and files deleted inside it
+# never shrink it: it keeps the largest size it ever reached (a train's home
+# took 28 GB on the Mac for 16 GB in use). fstrim hands the freed blocks back,
+# but it needs CAP_SYS_ADMIN, which the agent containers never get: a
+# throwaway container with no network and only the volume mounted runs it,
+# once nothing else holds the volume.
+cc-trim() {
+  local vol="${1:-${CC_HOME_VOLUME}}" img holders out before after
+  img="$(_cc_volume_image "${vol}")" || return 1
+  holders="$(_cc_volume_holders "${img}")" || return 1
+  if [ -n "${holders}" ]; then
+    echo "cc-trim: volume ${vol} is held by: ${holders}. Trim it after $(_cc_cmd down cc-down), or once a stopped holder is deleted (container delete <id>)." >&2
+    return 1
+  fi
+  # Unchecked, a missing local image sends container run to Docker Hub, whose
+  # 401 hides the real cause.
+  container image inspect "${CC_CONTAINER_IMAGE}" >/dev/null 2>&1 || {
+    echo "cc-trim: the helper runs ${CC_CONTAINER_IMAGE}, which is not built; run $(_cc_cmd build cc-container-build)" >&2
+    return 1
+  }
+  before="$(_cc_disk_usage "${img}")" || return 1
+  out="$(container run --rm --progress none --network none --cap-add CAP_SYS_ADMIN \
+    --volume "${vol}:/trim" --entrypoint fstrim "${CC_CONTAINER_IMAGE}" -v /trim 2>&1)" || {
+    echo "cc-trim: fstrim of volume ${vol} failed (helper image ${CC_CONTAINER_IMAGE}): ${out}" >&2
+    return 1
+  }
+  after="$(_cc_disk_usage "${img}")" || return 1
+  echo "trimmed:  ${vol}, ${before} -> ${after} on the Mac"
+}
+
 cc-down() {
+  local rc=0 img holders
   _cc_spin "stopping ${CC_SESSION_NAME}" _cc_session_remove
   echo "${CC_SESSION_NAME} removed."
+  # A one-off ccrun on the same volume still holds it: the next cc-down trims.
+  if img="$(_cc_volume_image "${CC_HOME_VOLUME}")" && holders="$(_cc_volume_holders "${img}")"; then
+    if [ -n "${holders}" ]; then
+      echo "trim:     skipped, ${CC_HOME_VOLUME} is still held by ${holders}"
+    else
+      cc-trim "${CC_HOME_VOLUME}" || rc=1
+    fi
+  else
+    rc=1
+  fi
   # Leave the host-side helpers up if anything else might still need them: a
   # one-off `ccrun` in another terminal would lose its network otherwise.
   if [ "$(_cc_other_containers)" -gt 0 ] 2>/dev/null; then
     echo "host helpers: left running (other containers still up)"
-    return 0
+    return "${rc}"
   fi
   _cc_listening "${CC_PROXY_PORT}" && cc-proxy-down >/dev/null 2>&1 && echo "stopped:  proxy"
   # A builder cc-container-build could not stop (an interrupted build, or a
   # plain `container build`). A build still running in another terminal would
   # be cut off, as the proxy already would cut it off.
   _cc_builder_running && _cc_builder_stop && echo "stopped:  buildkit builder"
+  _cc_build_reclaim || rc=1
   _cc_sim_auto_down
   _cc_call_hook "${CC_POST_DOWN_HOOK}" CC_POST_DOWN_HOOK
-  return 0
+  return "${rc}"
 }
 
 cc-status() {
@@ -1228,7 +1315,60 @@ cc-container-build() {
   _cc_container_build "$@"
   rc=$?
   [ "${builder_was_up}" = 0 ] && _cc_builder_running && _cc_builder_stop
+  [ "${rc}" = 0 ] && [ "${builder_was_up}" = 0 ] && { _cc_build_reclaim || rc=1; }
   return "${rc}"
+}
+
+# Containers of any state but the builder. A stopped one counts: it was created
+# from an image that must stay.
+_cc_all_containers() {
+  local json n
+  json="$(container list -a --format json)" || {
+    echo "cc-container: cannot list containers" >&2
+    return 1
+  }
+  n="$(printf '%s' "${json}" | jq -r '[.[] | .configuration.id // .id | select(startswith("buildkit") | not)] | length')"
+  case "${n}" in
+    ''|*[!0-9]*) echo "cc-container: cannot count containers (jq said '${n}')" >&2; return 1 ;;
+  esac
+  echo "${n}"
+}
+
+# Each build leaves the image it replaced behind, untagged, and the builder's
+# layer cache grows (CC_BUILD_CACHE); nothing frees either. This prunes every
+# dangling image, and runs only once no container exists, because the runtime
+# deletes an image even while a container still uses it.
+_cc_build_reclaim() {
+  local n out
+  case "${CC_BUILD_CACHE}" in
+    drop|keep) ;;
+    *) echo "cc-container: CC_BUILD_CACHE must be drop or keep, got '${CC_BUILD_CACHE}'" >&2; return 1 ;;
+  esac
+  n="$(_cc_all_containers)" || return 1
+  if [ "${n}" -gt 0 ]; then
+    echo "reclaim:  skipped, ${n} container(s) exist; cc-down reclaims once none do"
+    return 0
+  fi
+  out="$(container image prune 2>&1)" || {
+    echo "cc-container: container image prune failed: ${out}" >&2
+    return 1
+  }
+  echo "images:   ${out}"
+  [ "${CC_BUILD_CACHE}" = drop ] || return 0
+  if _cc_builder_running; then
+    echo "builder:  kept, it is running (a build in another terminal?)"
+    return 0
+  fi
+  out="$(container builder status --format json 2>&1)" || {
+    echo "cc-container: cannot read the buildkit builder's status: ${out}" >&2
+    return 1
+  }
+  [ "$(printf '%s' "${out}" | jq -r 'length')" = 0 ] && return 0
+  out="$(container builder delete 2>&1)" || {
+    echo "cc-container: could not delete the buildkit builder: ${out}; run: container builder delete" >&2
+    return 1
+  }
+  echo "deleted:  buildkit builder and its build cache (CC_BUILD_CACHE=drop)"
 }
 
 _cc_container_build() {
