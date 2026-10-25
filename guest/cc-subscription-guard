@@ -10,10 +10,13 @@ mount is read-only, root in the guest cannot edit it. That also covers
 pi-claude-bridge, whose model calls run through this same Claude Code.
 
 pi's own providers are outside that policy, so this script checks what pi could
-bill instead: exported provider credentials, ambient AWS credentials, and
-anything but OAuth in pi's auth.json. It runs at every session start; it cannot
-stop an agent that exports a key mid-session, which the policy file still does
-for Claude Code.
+bill instead: exported Anthropic, AWS and Claude Code credentials, ambient AWS
+credentials, and anything but OAuth in pi's auth.json. The env keys of pi's
+other providers (OPENROUTER_API_KEY, OPENAI_API_KEY, ...) are not enumerated,
+so a profile can pass one on purpose, e.g. for trainyard's openrouter billing,
+which holds every pi session to that one provider itself. It runs at every
+session start; it cannot stop an agent that exports a key mid-session, which the
+policy file still does for Claude Code.
 """
 
 import json

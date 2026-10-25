@@ -64,6 +64,10 @@ CC_EXTRA_RUN_ARGS=()
 # Only the mcp.env keys named here reach the container (CC_MCP stays 0, so the
 # rest of that file does not), e.g. for a CLI baked into the image:
 # _train_env_keys=(SUPABASE_ACCESS_TOKEN SUPABASE_PROJECT_ID)
+# For pi task sessions on OpenRouter (trainyard --pi-billing openrouter), add
+# OPENROUTER_API_KEY. Subscription-only mode does not refuse it, so give the key
+# a credit limit (README "Subscription-only mode"):
+# _train_env_keys=(OPENROUTER_API_KEY)
 _train_env_keys=()
 _train_mcp_env="${CC_CONFIG_DIR:-$HOME/.config/cc-container}/mcp.env"
 for _key in ${_train_env_keys+"${_train_env_keys[@]}"}; do
@@ -96,6 +100,9 @@ CC_ATTACH_COMMAND=(trainyard claude)
 # and writes the machine.json with the same repos. The checkout must be one of
 # those repos. The Claude.ai login is the one thing it cannot restore:
 # `cc-profile train attach`, then /login.
+# For pi task sessions (trainyard refuses to start one without pi-subagents), add
+#   && pi install npm:@tintinweb/pi-subagents \
+# after the mkdir line, so a recreated volume gets it back with the launcher.
 _train_checkout="${TRAINYARD_CHECKOUT:-$HOME/IdeaProjects/trainyard}"
 _train_container_json='/root/.config/trainyard/machine.json'
 CC_REQUIRED_COMMANDS=(trainyard)

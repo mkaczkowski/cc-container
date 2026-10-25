@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- **The train profile documents pi task sessions on OpenRouter.** trainyard's
+  `--pi-billing openrouter` needs `OPENROUTER_API_KEY` in the container:
+  `config/profile.train.example.sh` shows passing it through
+  `_train_env_keys` and installing pi-subagents with the launcher. The
+  subscription-only docs now say what the guard always did: it refuses
+  Anthropic, AWS and Claude Code credentials, not the keys of pi's other
+  providers.
 - **`ccdown` gives the home volume's freed space back to the Mac.** A volume
   is a sparse ext4 image that deleting files inside never shrinks (a train's
   home held 28 GB on the Mac for 16 GB in use). `cc-down` now runs `fstrim` on

@@ -66,7 +66,8 @@
 # CC_PI_SYNC=1
 # 1 allows only a Claude.ai subscription login: Claude Code (and pi through
 # pi-claude-bridge) refuses API keys, Console logins, Bedrock and Vertex, and pi
-# refuses to start while it sees such credentials. Recycle a running session
+# refuses to start while it sees Anthropic, AWS or Claude Code credentials (keys
+# of pi's other providers are not checked). Recycle a running session
 # (cc-down && cc-up) after changing it. See README "Subscription-only mode".
 # CC_SUBSCRIPTION_ONLY=0
 
