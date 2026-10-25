@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- **A missing image now says so.** After `container image prune -a` removed
+  the agent image, `cc-up`, `cc-container`, `cc-sim-up` and the upgrade
+  commands failed with a Docker Hub `401 Unauthorized` while trying to pull it.
+  They now check the local image first and name the build command to run
+  (`cc-profile <name> build` for a profile). `cc-doctor` checks the exact image
+  instead of any image sharing its name prefix, and the prune hints no longer
+  claim the image comes back by itself.
 - `config/profile.train.example.sh`: a profile for a trainyard train. It
   mounts every repo in trainyard's `machine.json` and attaches through
   `trainyard claude`.
