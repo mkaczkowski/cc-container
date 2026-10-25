@@ -764,13 +764,25 @@ _cc_session_size_change() {
   echo "${CC_SESSION_NAME} has $(( mem / 1048576 )) MB and ${cpus} CPUs, config wants $(( want / 1048576 )) MB and ${CC_SESSION_CPUS} CPUs"
 }
 
-# The CC_REQUIRED_COMMANDS that are not on the running session's PATH, one per line.
+# The CC_REQUIRED_COMMANDS that are not on the running session's PATH, one per
+# line. Fails when the session cannot be asked, so a stopped container is not
+# reported as a missing tool.
 _cc_session_missing_commands() {
-  local cmd
+  local cmd out
   for cmd in ${CC_REQUIRED_COMMANDS+"${CC_REQUIRED_COMMANDS[@]}"}; do
-    container exec "${CC_SESSION_NAME}" /bin/sh -c 'command -v "$1" >/dev/null' sh "${cmd}" \
-      || echo "${cmd}"
+    out="$(container exec "${CC_SESSION_NAME}" /bin/sh -c 'command -v "$1" >/dev/null || echo missing' sh "${cmd}")" || {
+      echo "cc-container: could not check for ${cmd} in ${CC_SESSION_NAME}" >&2
+      return 1
+    }
+    [ -z "${out}" ] || echo "${cmd}"
   done
+}
+
+# The above as one space-terminated line ("a b "), empty when none is missing.
+_cc_session_missing_line() {
+  local missing
+  missing="$(_cc_session_missing_commands)" || return 1
+  printf '%s' "${missing}" | tr '\n' ' '
 }
 
 # Fails, naming what is missing, unless every CC_REQUIRED_COMMANDS entry is on
@@ -778,7 +790,7 @@ _cc_session_missing_commands() {
 _cc_ensure_session_commands() {
   [ "${#CC_REQUIRED_COMMANDS[@]}" -gt 0 ] || return 0
   local missing
-  missing="$(_cc_session_missing_commands | tr '\n' ' ')"
+  missing="$(_cc_session_missing_line)" || return 1
   [ -n "${missing}" ] || return 0
   if [ -z "${CC_SETUP_COMMAND}" ]; then
     echo "cc-container: ${CC_SESSION_NAME} lacks: ${missing}(CC_REQUIRED_COMMANDS). They live in the ${CC_HOME_VOLUME} volume, which is empty after it is recreated. Install them, or set CC_SETUP_COMMAND in the profile to do it at every start." >&2
@@ -789,7 +801,7 @@ _cc_ensure_session_commands() {
     echo "cc-container: CC_SETUP_COMMAND failed in ${CC_SESSION_NAME}: ${CC_SETUP_COMMAND}" >&2
     return 1
   }
-  missing="$(_cc_session_missing_commands | tr '\n' ' ')"
+  missing="$(_cc_session_missing_line)" || return 1
   if [ -n "${missing}" ]; then
     echo "cc-container: CC_SETUP_COMMAND ran but ${CC_SESSION_NAME} still lacks: ${missing}(CC_REQUIRED_COMMANDS); command was: ${CC_SETUP_COMMAND}" >&2
     return 1
@@ -1278,8 +1290,9 @@ cc-doctor() {
 
   if [ "${#CC_REQUIRED_COMMANDS[@]}" -gt 0 ] && [ "$(_cc_session_state)" = "running" ]; then
     local lacking
-    lacking="$(_cc_session_missing_commands | tr '\n' ' ')"
-    if [ -z "${lacking}" ]; then
+    if ! lacking="$(_cc_session_missing_line)"; then
+      _p "required cmds" "could not ask ${CC_SESSION_NAME}"; ok=1
+    elif [ -z "${lacking}" ]; then
       _p "required cmds" "${CC_REQUIRED_COMMANDS[*]} present in ${CC_SESSION_NAME}"
     else
       _p "required cmds" "MISSING ${lacking}in ${CC_SESSION_NAME} - run: $(_cc_cmd up ccup)"; ok=1

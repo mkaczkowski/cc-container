@@ -562,9 +562,9 @@ trainyard train: it mounts every repo listed under `"repos"` in
 (`container volume rm`, a teardown), they are gone and the driver fails with
 `failed to find target executable trainyard`. The profile sets
 `CC_REQUIRED_COMMANDS=(trainyard)`, so `cc-profile train up` notices and runs
-its `CC_SETUP_COMMAND`: it installs the launcher from the mounted checkout
-(`TRAINYARD_CHECKOUT`, default `~/IdeaProjects/trainyard`, which must be one of
-the mounted repos) and rewrites `machine.json` with the same repos. The one
+its `CC_SETUP_COMMAND`: it installs the launcher from the committed `HEAD` of
+the mounted checkout (`TRAINYARD_CHECKOUT`, default `~/IdeaProjects/trainyard`,
+which must be one of the mounted repos) and rewrites `machine.json` with the same repos. The one
 thing it cannot restore is the Claude.ai login: `cc-profile train attach`, then
 `/login`. Also, `container image prune -a` removes the agent image when no
 container runs; rebuild it with `cc-profile train build`.
@@ -820,7 +820,7 @@ Apple-silicon user hits. For anything else, the wrapper gives you three seams in
 | `CC_EXTRA_RUN_ARGS` | Extra `container run` arguments (`--env`, `--volume`, …) |
 | `CC_PRE_RUN_HOOK` | A function run on the host before a container starts |
 | `CC_POST_DOWN_HOOK` | A function run by `cc-down` once no containers remain |
-| `CC_REQUIRED_COMMANDS` | Commands the shared session must have once `cc-up` has started it, for tools kept in the home volume; `cc-up` fails naming any that are missing |
+| `CC_REQUIRED_COMMANDS` | Commands the shared session must have once `cc-up` has started it (not checked for one-off runs), for tools kept in the home volume; `cc-up` fails naming any that are missing |
 | `CC_SETUP_COMMAND` | A shell command `cc-up` runs inside the session when a required command is missing, to install it again (then checks once more) |
 
 Guest-side helpers go in a directory you mount at `/opt/cc-local`, which is on
