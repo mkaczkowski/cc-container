@@ -7,8 +7,10 @@
   home held 28 GB on the Mac for 16 GB in use). `cc-down` now runs `fstrim` on
   it from a throwaway container with no network and only the volume mounted,
   so `CAP_SYS_ADMIN` never reaches an agent container; it skips the trim while
-  a one-off `ccrun` still holds the volume. `cc-trim [volume]` (or
-  `cc-profile <name> trim`) does it by hand.
+  a one-off `ccrun` still holds the volume. A failed trim is a warning, not a
+  failed `cc-down`, and a start right after `cc-down` waits for the helper to
+  release the volume. `cc-trim [volume]` (or `cc-profile <name> trim`) does it
+  by hand.
 - **Builds no longer leave old images and a growing build cache behind.**
   Once no container exists (after `cc-container-build`, or at `cc-down`),
   dangling images (those a rebuild untagged, and any other untagged image on
