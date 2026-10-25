@@ -127,7 +127,11 @@ direct egress.
   are used. `CC_SUBSCRIPTION_ONLY=1` limits both agents to a Claude.ai
   subscription (see README "Subscription-only mode"). It checks pi only when a
   session starts, so an agent that exports a key and runs pi from a shell
-  mid-session is not caught; Claude Code's managed policy holds throughout.
+  mid-session is not caught; Claude Code's managed policy holds throughout. It
+  does not refuse the keys of pi's other providers (`OPENROUTER_API_KEY` and
+  the like): one passed in, e.g. for a trainyard train on OpenRouter, is
+  readable by every unattended agent in the VM and shows in `container
+  inspect`, and egress is unrestricted. Give such a key a credit limit.
 - **Sessions share a filesystem.** In multi-session mode two agents editing the
   same file will overwrite each other. That is a correctness property, not a
   security one, but it surprises people.

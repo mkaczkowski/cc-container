@@ -569,6 +569,18 @@ thing it cannot restore is the Claude.ai login: `cc-profile train attach`, then
 `/login`. Also, `container image prune -a` removes the agent image when no
 container runs; rebuild it with `cc-profile train build`.
 
+To run the train's task sessions on pi with OpenRouter models
+(`trainyard run --harness pi --pi-billing openrouter`), put
+`OPENROUTER_API_KEY=...` in `mcp.env` and name it in the profile's
+`_train_env_keys`, then `cc-profile train down && cc-profile train up`. Map
+trainyard's model aliases in the container's
+`/root/.config/trainyard/machine.json` (`"pi": {"models": {"opus": ...,
+"sonnet": ..., "haiku": ...}}`, each an `openrouter/<vendor>/<model>` id). Install
+pi-subagents into `train-home` too (the profile says where): the train's
+skills start subagents through it, and trainyard refuses a pi train without it. Keep the Claude.ai login:
+landings and `land auto` still run on Claude Code. The key passes
+subscription-only mode by design, so give it a credit limit (`SECURITY.md`).
+
 ## Configuration
 
 Everything user-specific lives outside the repo, mostly in
@@ -668,6 +680,10 @@ Vertex, for Claude Code and for pi alike. Recycle a running session afterwards
   while `ANTHROPIC_*`, `AWS_*` or `CLAUDE_CODE_USE_*` is exported, `~/.aws`
   exists, or pi's `auth.json` holds anything but an OAuth login. The error names
   each problem and how to clear it.
+- **pi's other providers are not refused.** Their env keys
+  (`OPENROUTER_API_KEY`, `OPENAI_API_KEY` and the like) pass the check, so a
+  profile can pass one in on purpose, as the train profile can for
+  trainyard's openrouter billing. Nothing passes one unless you add it.
 
 Check which account is in use with `claude auth status` (from pi:
 `!claude auth status`): a subscription shows `"authMethod": "claude.ai"` and a

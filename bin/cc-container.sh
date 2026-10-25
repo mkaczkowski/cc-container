@@ -77,7 +77,8 @@ CC_SKIP_PERMISSIONS="${CC_SKIP_PERMISSIONS:-1}"
 
 # Subscription-only mode: 1 makes Claude Code (and pi-claude-bridge, which runs
 # through it) refuse anything but a Claude.ai subscription login, and refuses to
-# start pi while it holds or sees non-subscription credentials. Claude Code
+# start pi while it holds or sees Anthropic, AWS or Claude Code credentials (keys
+# of pi's other providers, e.g. OPENROUTER_API_KEY, are not checked). Claude Code
 # enforces it from a managed policy mounted read-only at /etc/claude-code, so the
 # guest cannot edit it; guest/cc-subscription-guard checks the rest at start.
 CC_SUBSCRIPTION_ONLY="${CC_SUBSCRIPTION_ONLY:-0}"
