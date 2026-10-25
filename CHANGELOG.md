@@ -17,6 +17,21 @@
   (9 GB was seen), so the next build starts cold. `CC_BUILD_CACHE=keep` keeps
   it. Nothing is pruned while any container exists, running or stopped: the
   runtime deletes an image even while a container still uses it.
+- **`CC_REQUIRED_COMMANDS` and `CC_SETUP_COMMAND`: tools kept in the home
+  volume.** A tool installed into the home volume is gone when the volume is
+  recreated, and the failure came much later (`failed to find target executable
+  trainyard`). `cc-up` now checks that each required command is on the
+  session's `PATH` and either runs `CC_SETUP_COMMAND` to install it again or
+  fails naming what is missing. `config/profile.train.example.sh` uses it to
+  reinstall the trainyard launcher and rewrite the container's `machine.json`.
+  `cc-doctor` reports them too.
+- **A missing image now says so.** After `container image prune -a` removed
+  the agent image, `cc-up`, `cc-container`, `cc-sim-up` and the upgrade
+  commands failed with a Docker Hub `401 Unauthorized` while trying to pull it.
+  They now check the local image first and name the build command to run
+  (`cc-profile <name> build` for a profile). `cc-doctor` checks the exact image
+  instead of any image sharing its name prefix, and the prune hints no longer
+  claim the image comes back by itself.
 - `config/profile.train.example.sh`: a profile for a trainyard train. It
   mounts every repo in trainyard's `machine.json` and attaches through
   `trainyard claude`.

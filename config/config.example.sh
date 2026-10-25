@@ -50,6 +50,12 @@
 # CC_SESSION_NAME=cc-session
 # The command cc-attach runs, as argv; claude's arguments follow it.
 # CC_ATTACH_COMMAND=(claude)
+# Commands the session must have on its PATH after cc-up, for a tool that lives
+# in the home volume (not the image). cc-up fails naming any that are missing,
+# or runs CC_SETUP_COMMAND (a shell command, run in the session) to install
+# them and checks again. See config/profile.train.example.sh.
+# CC_REQUIRED_COMMANDS=(mytool)
+# CC_SETUP_COMMAND='npm i -g --prefix /root/.local mytool'
 # Named volume mounted as the container's home (/root). Only one running
 # container can hold it; a profile running beside the session needs its own.
 # CC_HOME_VOLUME=cc-home

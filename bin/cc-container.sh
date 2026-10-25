@@ -91,6 +91,17 @@ CC_SESSION_NAME="${CC_SESSION_NAME:-cc-session}"
 CC_ATTACH_COMMAND=(${CC_ATTACH_COMMAND+"${CC_ATTACH_COMMAND[@]}"})
 [ "${#CC_ATTACH_COMMAND[@]}" -gt 0 ] || CC_ATTACH_COMMAND=(claude)
 
+# Commands the shared session must have on its PATH once cc-up has started it,
+# for a tool that lives in the home volume rather than the image (an installer
+# run once per volume). A volume that is recreated loses it, and the session
+# would otherwise fail much later with "failed to find target executable".
+# CC_SETUP_COMMAND is a shell command run inside the session when one is
+# missing; without it cc-up refuses to finish and says what is missing.
+#   CC_REQUIRED_COMMANDS=(trainyard)
+#   CC_SETUP_COMMAND='npm i -g --install-links --prefix /root/.local /path/to/pkg'
+CC_REQUIRED_COMMANDS=(${CC_REQUIRED_COMMANDS+"${CC_REQUIRED_COMMANDS[@]}"})
+CC_SETUP_COMMAND="${CC_SETUP_COMMAND:-}"
+
 # Free space on the Mac's data volume, in GB. The VM disks, the home volumes,
 # the images and every mounted checkout all live there, and when it fills, a
 # running guest's root file system hits I/O errors and turns read-only until
@@ -362,7 +373,7 @@ _cc_disk_guard() {
     echo "cc-container: only ${free} GB free on the Mac (CC_DISK_MIN_GB=${CC_DISK_MIN_GB}); refusing to start." >&2
     echo "  A full disk turns running guests' root file systems read-only. Free space first:" >&2
     echo "    container system df            # what images, containers and volumes take" >&2
-    echo "    container image prune -a       # unused images (rebuilt when next needed)" >&2
+    echo "    container image prune -a       # unused images, the agent image too unless a session runs; rebuild it with cc-container-build" >&2
     echo "  Or run this one command anyway: CC_DISK_MIN_GB=0 <command>" >&2
     return 1
   fi
@@ -487,9 +498,10 @@ _cc_sim_ensure_bridge() {
   _cc_host_has_addr "${host}" && return 0
   echo "cc-sim-up: ${host} is not assigned yet, starting a probe container to bring up the vmnet bridge..." >&2
   _cc_sim_release_probe
+  _cc_image_present || return 1
   if ! container run -d --name "${CC_SIM_PROBE_NAME}" --entrypoint /bin/sleep \
          "${CC_CONTAINER_IMAGE}" infinity >/dev/null 2>&1; then
-    echo "cc-sim-up: could not start probe container ${CC_SIM_PROBE_NAME} from ${CC_CONTAINER_IMAGE}; run 'cc-container-build' if the image is missing" >&2
+    echo "cc-sim-up: could not start probe container ${CC_SIM_PROBE_NAME} from ${CC_CONTAINER_IMAGE}" >&2
     return 1
   fi
   local _
@@ -657,6 +669,7 @@ _cc_run() {
   esac
   cc-runtime-up || return 1
   _cc_disk_guard enforce || return 1
+  _cc_image_present || return 1
   _cc_proxy_collect || return 1
   _cc_sim_auto_up || return 1
   _cc_call_hook "${CC_PRE_RUN_HOOK}" CC_PRE_RUN_HOOK || return 1
@@ -704,6 +717,21 @@ _cc_cmd() {
   if [ -n "${CC_PROFILE}" ]; then echo "cc-profile ${CC_PROFILE} $1"; else echo "$2"; fi
 }
 
+# Fails unless ${CC_CONTAINER_IMAGE} is in the local image store. Without it,
+# `container run` tries to pull the name from Docker Hub and fails with a 401
+# that does not say the image is simply missing (e.g. after an image prune).
+_cc_image_present() {
+  local out
+  out="$(container image inspect "${CC_CONTAINER_IMAGE}" 2>&1 >/dev/null)" && return 0
+  case "${out}" in
+    *"not found"*)
+      echo "cc-container: image ${CC_CONTAINER_IMAGE} is not built (removed by an image prune?); build it with: $(_cc_cmd build cc-container-build)" >&2 ;;
+    *)
+      echo "cc-container: could not inspect image ${CC_CONTAINER_IMAGE}: ${out}" >&2 ;;
+  esac
+  return 1
+}
+
 _cc_session_state() {
   container inspect "${CC_SESSION_NAME}" 2>/dev/null \
     | jq -r '.[0].status.state // empty' 2>/dev/null
@@ -736,10 +764,43 @@ _cc_session_size_change() {
   echo "${CC_SESSION_NAME} has $(( mem / 1048576 )) MB and ${cpus} CPUs, config wants $(( want / 1048576 )) MB and ${CC_SESSION_CPUS} CPUs"
 }
 
+# The CC_REQUIRED_COMMANDS that are not on the running session's PATH, one per line.
+_cc_session_missing_commands() {
+  local cmd
+  for cmd in ${CC_REQUIRED_COMMANDS+"${CC_REQUIRED_COMMANDS[@]}"}; do
+    container exec "${CC_SESSION_NAME}" /bin/sh -c 'command -v "$1" >/dev/null' sh "${cmd}" \
+      || echo "${cmd}"
+  done
+}
+
+# Fails, naming what is missing, unless every CC_REQUIRED_COMMANDS entry is on
+# the session's PATH, running CC_SETUP_COMMAND once to install them if set.
+_cc_ensure_session_commands() {
+  [ "${#CC_REQUIRED_COMMANDS[@]}" -gt 0 ] || return 0
+  local missing
+  missing="$(_cc_session_missing_commands | tr '\n' ' ')"
+  [ -n "${missing}" ] || return 0
+  if [ -z "${CC_SETUP_COMMAND}" ]; then
+    echo "cc-container: ${CC_SESSION_NAME} lacks: ${missing}(CC_REQUIRED_COMMANDS). They live in the ${CC_HOME_VOLUME} volume, which is empty after it is recreated. Install them, or set CC_SETUP_COMMAND in the profile to do it at every start." >&2
+    return 1
+  fi
+  echo "${CC_SESSION_NAME} lacks: ${missing}; running CC_SETUP_COMMAND..."
+  container exec "${CC_SESSION_NAME}" /bin/bash -c "${CC_SETUP_COMMAND}" || {
+    echo "cc-container: CC_SETUP_COMMAND failed in ${CC_SESSION_NAME}: ${CC_SETUP_COMMAND}" >&2
+    return 1
+  }
+  missing="$(_cc_session_missing_commands | tr '\n' ' ')"
+  if [ -n "${missing}" ]; then
+    echo "cc-container: CC_SETUP_COMMAND ran but ${CC_SESSION_NAME} still lacks: ${missing}(CC_REQUIRED_COMMANDS); command was: ${CC_SETUP_COMMAND}" >&2
+    return 1
+  fi
+}
+
 cc-up() {
   _cc_config_current || return 1
   cc-runtime-up || return 1
   _cc_disk_guard enforce || return 1
+  _cc_image_present || return 1
   _cc_proxy_collect || return 1
   _cc_sim_auto_up || return 1
   _cc_call_hook "${CC_PRE_RUN_HOOK}" CC_PRE_RUN_HOOK || return 1
@@ -750,6 +811,7 @@ cc-up() {
     size="$(_cc_session_size_change)" || return 1
   fi
   if [ "${state}" = "running" ]; then
+    _cc_ensure_session_commands || return 1
     echo "${CC_SESSION_NAME} already running. Attach with: $(_cc_cmd attach cc-attach)"
     [ -n "${size}" ] && echo "note: ${size}. ccdown && ccup applies it (it ends attached sessions)."
     return 0
@@ -787,6 +849,7 @@ cc-up() {
       "${CC_CONTAINER_IMAGE}" -c '/opt/cc-tools/cc-workspace-link && exec sleep infinity' || return 1
   fi
   _cc_sim_release_probe
+  _cc_ensure_session_commands || return 1
   echo "${CC_SESSION_NAME} up, mounting ${PWD}. Attach with: $(_cc_cmd attach cc-attach)"
 }
 
@@ -1197,9 +1260,9 @@ cc-doctor() {
   fi
   reclaim="$(container system df 2>/dev/null | awk '$1 == "Images" {print $6, $7, $8}')"
   [ -n "${reclaim}" ] \
-    && _p "images reclaimable" "${reclaim} - container image prune -a frees it (pulled or rebuilt when next needed)"
+    && _p "images reclaimable" "${reclaim} - container image prune -a frees it, but removes the agent image too unless a session runs (rebuild: $(_cc_cmd build cc-container-build))"
 
-  if container image list 2>/dev/null | grep -q "${CC_CONTAINER_IMAGE%%:*}"; then
+  if container image inspect "${CC_CONTAINER_IMAGE}" >/dev/null 2>&1; then
     _p "image" "${CC_CONTAINER_IMAGE} present"
     local versions
     versions="$(container run --rm --entrypoint /bin/sh "${CC_CONTAINER_IMAGE}" -c \
@@ -1210,7 +1273,17 @@ cc-doctor() {
       *) _p "pi" "$(echo "${versions}" | sed -n 2p)" ;;
     esac
   else
-    _p "image" "MISSING - run: cc-container-build"; ok=1
+    _p "image" "MISSING ${CC_CONTAINER_IMAGE} - run: $(_cc_cmd build cc-container-build)"; ok=1
+  fi
+
+  if [ "${#CC_REQUIRED_COMMANDS[@]}" -gt 0 ] && [ "$(_cc_session_state)" = "running" ]; then
+    local lacking
+    lacking="$(_cc_session_missing_commands | tr '\n' ' ')"
+    if [ -z "${lacking}" ]; then
+      _p "required cmds" "${CC_REQUIRED_COMMANDS[*]} present in ${CC_SESSION_NAME}"
+    else
+      _p "required cmds" "MISSING ${lacking}in ${CC_SESSION_NAME} - run: $(_cc_cmd up ccup)"; ok=1
+    fi
   fi
 
   for tool in jq python3; do
@@ -1486,6 +1559,7 @@ ccupd() { cc-update "$@"; }
 # same network path (and proxy) the build will use.
 _cc_latest_npm_version() {
   local version
+  _cc_image_present || return 1
   version="$(container run --rm --dns 8.8.8.8 \
     ${CC_PROXY_ARGS+"${CC_PROXY_ARGS[@]}"} \
     --entrypoint /bin/bash "${CC_CONTAINER_IMAGE}" \
