@@ -29,7 +29,8 @@ CC_SUBSCRIPTION_ONLY=1
 # --- what it must not inherit ------------------------------------------------
 # Only the project directories: no notes, vaults or tool directories of yours.
 # Every repo in trainyard's machine.json "repos" is mounted at its Mac path, so
-# a second repo's train runs its sessions here too.
+# a second repo's train runs its sessions here too, unless its project.json
+# keeps its train off the container.
 _train_machine_json="${XDG_CONFIG_HOME:-$HOME/.config}/trainyard/machine.json"
 if [ ! -r "${_train_machine_json}" ]; then
   echo "train profile: ${_train_machine_json} does not exist; create it with a \"repos\" list" >&2
@@ -43,12 +44,33 @@ fi
 CC_EXTRA_VOLUME_ARGS=()
 _train_repos_json=
 while IFS= read -r _repo; do
+  # A repo whose train may not run in the container (hosts.allowed without
+  # "container", e.g. one that must bill AWS Bedrock on the Mac) is not
+  # mounted: its run directories never reach a subscription session.
+  _train_pj="${_repo}/.train/project.json"
+  if [ -r "${_train_pj}" ]; then
+    # project.json may hold comments and trailing commas (JSONC), so not jq.
+    _train_in="$(python3 -c '
+import json, re, sys
+keep = lambda m: m.group(0) if m.group(0)[0] == "\"" else ""
+t = re.sub(r"\"(?:\\.|[^\"\\])*\"|//[^\n]*|/\*.*?\*/", keep, open(sys.argv[1]).read(), flags=re.S)
+t = re.sub(r"\"(?:\\.|[^\"\\])*\"|,(?=\s*[}\]])", keep, t)
+print("yes" if "container" in json.loads(t).get("hosts", {}).get("allowed", ["container"]) else "no")
+' "${_train_pj}")" || {
+      echo "train profile: cannot read hosts.allowed from ${_train_pj}; fix its JSON" >&2
+      return 1
+    }
+    if [ "${_train_in}" = no ]; then
+      echo "train profile: not mounting ${_repo}: its hosts.allowed leaves out container" >&2
+      continue
+    fi
+  fi
   CC_EXTRA_VOLUME_ARGS+=(--volume "${_repo}:${_repo}")
   _train_repos_json="${_train_repos_json:+${_train_repos_json}, }\"${_repo}\""
 done <<EOF
 ${_train_repos}
 EOF
-unset _repo _train_repos _train_machine_json
+unset _repo _train_repos _train_machine_json _train_pj _train_in
 # A directory of screenshots, read-only at its Mac path, so a screenshot path
 # pasted into a session resolves unchanged in the guest:
 # CC_EXTRA_VOLUME_ARGS+=(--volume "$HOME/Pictures/Screenshots:$HOME/Pictures/Screenshots:ro")

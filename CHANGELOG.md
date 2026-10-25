@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- **The train profile does not mount a repo whose train stays off the
+  container.** A repo in trainyard's `machine.json` whose
+  `.train/project.json` `hosts.allowed` leaves out `container` (one that must
+  bill AWS Bedrock on the Mac) is skipped, with a line saying so, and left out
+  of the container's `machine.json`: its run directories and diffs never
+  reach a subscription session. An unreadable `project.json` stops `up`.
 - **The train profile documents pi task sessions on OpenRouter.** trainyard's
   `--pi-billing openrouter` needs `OPENROUTER_API_KEY` in the container:
   `config/profile.train.example.sh` shows passing it through
