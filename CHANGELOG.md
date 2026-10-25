@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+- **`ccdown` gives the home volume's freed space back to the Mac.** A volume
+  is a sparse ext4 image that deleting files inside never shrinks (a train's
+  home held 28 GB on the Mac for 16 GB in use). `cc-down` now runs `fstrim` on
+  it from a throwaway container with no network and only the volume mounted,
+  so `CAP_SYS_ADMIN` never reaches an agent container; it skips the trim while
+  a one-off `ccrun` still holds the volume. `cc-trim [volume]` (or
+  `cc-profile <name> trim`) does it by hand.
+- **Builds no longer leave old images and a growing build cache behind.**
+  Once no container exists (after `cc-container-build`, or at `cc-down`),
+  dangling images (those a rebuild untagged, and any other untagged image on
+  the Mac) are pruned and, with the new default
+  `CC_BUILD_CACHE=drop`, the buildkit builder is deleted with its layer cache
+  (9 GB was seen), so the next build starts cold. `CC_BUILD_CACHE=keep` keeps
+  it. Nothing is pruned while any container exists, running or stopped: the
+  runtime deletes an image even while a container still uses it.
 - **`CC_REQUIRED_COMMANDS` and `CC_SETUP_COMMAND`: tools kept in the home
   volume.** A tool installed into the home volume is gone when the volume is
   recreated, and the failure came much later (`failed to find target executable

@@ -35,6 +35,12 @@ container is its own VM, so this does not reach the Mac or the other
 containers; it does mean the VM boundary is the only one left around that
 container's root, as it already is for the session.
 
+`cc-trim`, which `cc-down` runs, is the one place the wrapper itself adds a
+capability: `fstrim` needs `CAP_SYS_ADMIN`. It runs in a throwaway container
+of its own, with no network and only the home volume mounted, after the
+session has released that volume. No agent runs in it, and the session
+containers never get the capability.
+
 
 ## If you bridge a host-only tool
 
