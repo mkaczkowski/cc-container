@@ -93,7 +93,9 @@ CC_ATTACH_COMMAND=(trainyard claude)
 # executable trainyard". cc-up checks for the launcher at every start and, if it
 # is missing, runs this once: installs it from the committed HEAD of the mounted
 # checkout (not its working tree, so unfinished edits never reach the container)
-# and writes the machine.json with the same repos. The checkout must be one of
+# and writes the machine.json with the same repos, following the checkout's
+# origin main (engine.follow) as the Mac does, so a merged engine change reaches
+# the container's trains without a release. The checkout must be one of
 # those repos. The Claude.ai login is the one thing it cannot restore:
 # `cc-profile train attach`, then /login.
 _train_checkout="${TRAINYARD_CHECKOUT:-$HOME/IdeaProjects/trainyard}"
@@ -104,5 +106,5 @@ CC_SETUP_COMMAND="set -o pipefail; d=\$(mktemp -d) \
   && npm i -g --install-links --prefix /root/.local \"\$d\" \
   && rm -rf \"\$d\" \
   && mkdir -p /root/.config/trainyard \
-  && { [ -e ${_train_container_json} ] || printf '{\"maxSessions\": 4, \"repos\": [%s]}\n' '${_train_repos_json}' > ${_train_container_json}; }"
+  && { [ -e ${_train_container_json} ] || printf '{\"maxSessions\": 4, \"engine\": {\"follow\": \"%s\"}, \"repos\": [%s]}\n' '${_train_checkout}' '${_train_repos_json}' > ${_train_container_json}; }"
 unset _train_checkout _train_container_json _train_repos_json
