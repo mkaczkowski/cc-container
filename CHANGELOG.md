@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- **`CC_REQUIRED_COMMANDS` and `CC_SETUP_COMMAND`: tools kept in the home
+  volume.** A tool installed into the home volume is gone when the volume is
+  recreated, and the failure came much later (`failed to find target executable
+  trainyard`). `cc-up` now checks that each required command is on the
+  session's `PATH` and either runs `CC_SETUP_COMMAND` to install it again or
+  fails naming what is missing. `config/profile.train.example.sh` uses it to
+  reinstall the trainyard launcher and rewrite the container's `machine.json`.
+  `cc-doctor` reports them too.
 - **A missing image now says so.** After `container image prune -a` removed
   the agent image, `cc-up`, `cc-container`, `cc-sim-up` and the upgrade
   commands failed with a Docker Hub `401 Unauthorized` while trying to pull it.

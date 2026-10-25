@@ -41,8 +41,10 @@ if [ -z "${_train_repos}" ]; then
   return 1
 fi
 CC_EXTRA_VOLUME_ARGS=()
+_train_repos_json=
 while IFS= read -r _repo; do
   CC_EXTRA_VOLUME_ARGS+=(--volume "${_repo}:${_repo}")
+  _train_repos_json="${_train_repos_json:+${_train_repos_json}, }\"${_repo}\""
 done <<EOF
 ${_train_repos}
 EOF
@@ -83,3 +85,20 @@ CC_SIM_AUTO=1
 # --- attach ------------------------------------------------------------------
 # `cc-profile train attach` starts Claude Code through trainyard.
 CC_ATTACH_COMMAND=(trainyard claude)
+
+# --- what a recreated home volume loses ---------------------------------------
+# trainyard's launcher and the container's own machine.json live in the home
+# volume, not the image. When the volume is recreated (a teardown, a volume
+# removal) both are gone and the driver fails with "failed to find target
+# executable trainyard". cc-up checks for the launcher at every start and, if it
+# is missing, runs this once: installs it from the mounted checkout (a copy, so
+# the container does not follow your working tree) and writes the machine.json
+# with the same repos. The checkout must be one of those repos. The Claude.ai
+# login is the one thing it cannot restore: `cc-profile train attach`, /login.
+_train_checkout="${TRAINYARD_CHECKOUT:-$HOME/IdeaProjects/trainyard}"
+_train_container_json='/root/.config/trainyard/machine.json'
+CC_REQUIRED_COMMANDS=(trainyard)
+CC_SETUP_COMMAND="npm i -g --install-links --prefix /root/.local '${_train_checkout}/packages/engine' \
+  && mkdir -p /root/.config/trainyard \
+  && { [ -e ${_train_container_json} ] || printf '{\"maxSessions\": 4, \"repos\": [%s]}\n' '${_train_repos_json}' > ${_train_container_json}; }"
+unset _train_checkout _train_container_json _train_repos_json
