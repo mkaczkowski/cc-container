@@ -1020,6 +1020,19 @@ container system stop && container system start
 container delete buildkit                # recreated on the next build
 ```
 
+**`ccdown` (or the recreate step of `ccup`) prints `container stop ... did not
+finish` or `container kill ... did not finish either`.** The session's VM is
+wedged at the host level, not just slow to shut down: `container exec` and
+`container logs` against it would hang too. `_cc_session_remove` bounds its
+wait for `stop`/`kill` at `CC_SESSION_STOP_TIMEOUT` seconds (30 by default) and
+then fails with this message instead of hanging forever. Recover by hand:
+
+```bash
+ps aux | grep "container-runtime-linux.*--uuid <session-name>"
+kill -9 <pid>                            # drops the wedged VM
+container system stop && container system start
+```
+
 **A tool in `/opt/cc-local` reports `command not found`.** Check whether the
 directory is mounted at all (`ccxs -c 'ls /opt/cc-local'`) before suspecting
 `PATH`: an entry missing from `CC_EXTRA_VOLUME_ARGS` looks identical, from

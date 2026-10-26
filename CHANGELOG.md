@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- **`ccdown` no longer hangs forever on a wedged session VM.** `container
+  stop`/`container exec`/`container logs` can all block indefinitely against a
+  VM that is wedged at the host level, not just slow to shut down.
+  `_cc_session_remove` now bounds `stop` and a `kill` fallback to
+  `CC_SESSION_STOP_TIMEOUT` seconds (30 by default) and fails with an
+  actionable message (find and kill the VM's host process, then restart the
+  runtime) instead of hanging; `ccdown` reports the failure instead of always
+  claiming the session was removed.
 - **The train profile does not mount a repo whose train stays off the
   container.** A repo in trainyard's `machine.json` whose
   `.train/project.json` `hosts.allowed` leaves out `container` (one that must
