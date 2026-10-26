@@ -343,6 +343,28 @@ _cc_spin() {
 }
 _cc_quiet() { "$@" >/dev/null 2>&1; }
 
+# Runs "$@", killing it if it is still running after $1 seconds, and returning
+# 124 (the same convention as GNU timeout, which macOS does not ship). A VM
+# wedged at the host level (not just a slow guest) leaves `container`
+# subcommands that talk to it, like stop/kill/exec, blocked forever: without
+# this, _cc_session_remove would hang cc-down/cc-up indefinitely instead of
+# failing with something actionable.
+_cc_timeout() {
+  local secs="$1"; shift
+  "$@" &
+  local pid=$! waited=0
+  while kill -0 "${pid}" 2>/dev/null && [ "${waited}" -lt "${secs}" ]; do
+    sleep 1
+    waited=$((waited + 1))
+  done
+  if kill -0 "${pid}" 2>/dev/null; then
+    kill -9 "${pid}" 2>/dev/null
+    wait "${pid}" 2>/dev/null
+    return 124
+  fi
+  wait "${pid}"
+}
+
 cc-runtime-up() {
   if container system status >/dev/null 2>&1; then return 0; fi
   echo "cc-container: container runtime not running, starting it..." >&2
@@ -1092,7 +1114,16 @@ _cc_other_containers() {
 }
 
 _cc_session_remove() {
-  container stop "${CC_SESSION_NAME}" 2>/dev/null
+  if ! _cc_timeout "${CC_SESSION_STOP_TIMEOUT:-30}" container stop "${CC_SESSION_NAME}" 2>/dev/null; then
+    echo "cc-container: container stop ${CC_SESSION_NAME} did not finish in ${CC_SESSION_STOP_TIMEOUT:-30}s; its VM may be wedged (exec and logs would hang too). Trying container kill..." >&2
+    if ! _cc_timeout "${CC_SESSION_STOP_TIMEOUT:-30}" container kill "${CC_SESSION_NAME}" 2>/dev/null; then
+      echo "cc-container: container kill ${CC_SESSION_NAME} did not finish either; the runtime itself is stuck, not just the guest. Find its VM process and kill it, then restart the runtime:
+  ps aux | grep \"container-runtime-linux.*--uuid ${CC_SESSION_NAME}\"
+  kill -9 <pid>
+  container system stop && container system start" >&2
+      return 1
+    fi
+  fi
   sleep 2
   container delete "${CC_SESSION_NAME}" 2>/dev/null
 }
@@ -1187,7 +1218,10 @@ _cc_trim_wait() {
 # trainyard host stop would otherwise count as failed).
 cc-down() {
   local img holders
-  _cc_spin "stopping ${CC_SESSION_NAME}" _cc_session_remove
+  if ! _cc_spin "stopping ${CC_SESSION_NAME}" _cc_session_remove; then
+    echo "cc-container: ${CC_SESSION_NAME} was not removed; see above" >&2
+    return 1
+  fi
   echo "${CC_SESSION_NAME} removed."
   if ! container volume inspect "${CC_HOME_VOLUME}" >/dev/null 2>&1; then
     echo "trim:     skipped, no volume ${CC_HOME_VOLUME} yet"
