@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+- **A closed terminal no longer leaves its session running in the shared
+  container.** Closing the Mac side of `container exec -it` does not hang up
+  the guest, so every `ccx`/`pix` whose terminal was closed kept running until
+  `ccdown` (one train container held 23 of them, about 6.5 GB). `ccx` and
+  `pix` now tag their session with `CC_ATTACH_ID`, and `ccx`, `pix` and `ccup`
+  first end every tagged session whose `container exec` client is gone
+  (`cc-reap` runs it on demand, `guest/cc-reap` does the work). Untagged
+  processes, such as a train's console and sessions, are never touched.
+- **The session boots with a larger kernel memory reserve.**
+  `CC_SESSION_SYSCTLS` (default `vm.min_free_kbytes=262144
+  vm.watermark_scale_factor=200`) is passed as `--kernel-arg sysctl.*`. With
+  the kernel's 14 MB default, virtiofs reads of the project failed with
+  `ENOMEM` under memory pressure, which stopped trainyard's driver. An
+  existing session reports the difference; `ccdown && ccup` applies it.
+- **Removed herdr support.** `cc-worktree`/`ccwt`, `pi-worktree`/`piwt` and
+  the `HERDR_AGENT` variable set on session launchers are gone.
+
 - **`ccdown` no longer hangs forever on a wedged session VM.** `container
   stop`/`container exec`/`container logs` can all block indefinitely against a
   VM that is wedged at the host level, not just slow to shut down.

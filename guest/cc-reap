@@ -1,0 +1,76 @@
+#!/bin/sh
+# Ends attached sessions whose terminal on the Mac is gone.
+#
+# Closing the Mac side of `container exec -it` does not hang up the guest pty,
+# so a ccx or pix whose terminal was closed kept running (and holding its
+# memory) until ccdown. cc-attach and pi-attach tag their session with
+# CC_ATTACH_ID; the Mac passes the IDs whose `container exec` client is still
+# alive. A session leader started by `container exec` (parent pid 0) whose tag
+# is not among them gets SIGHUP, then SIGKILL after a grace period. Untagged
+# sessions (the train console, its sessions, a ccxs shell) are never touched.
+#
+# Usage: cc-reap [live-id...]
+set -eu
+
+GRACE_SECONDS="${CC_REAP_GRACE_SECONDS:-10}"
+# The loop below reuses the positional parameters, so keep the live IDs here.
+live_ids="$*"
+
+# Signals every process in session $2, treating "none left" (pkill's 1) as done.
+signal_session() {
+  status=0
+  pkill "-$1" -s "$2" || status=$?
+  [ "${status}" -le 1 ] || { echo "cc-reap: pkill -$1 -s $2 failed (exit ${status})" >&2; exit 1; }
+}
+
+is_live() {
+  for live in "$@"; do
+    [ "${live}" = "${tag}" ] && return 0
+  done
+  return 1
+}
+
+tagged=""
+for dir in /proc/[0-9]*; do
+  pid="${dir#/proc/}"
+  # The leader may exit between the listing and the reads: skip it then.
+  stat="$(cat "${dir}/stat" 2>/dev/null)" || continue
+  environ="$(tr '\0' '\n' <"${dir}/environ" 2>/dev/null)" || continue
+  # Fields after the command's closing paren: state ppid pgrp session.
+  rest="${stat##*) }"
+  # shellcheck disable=SC2086
+  set -- ${rest}
+  ppid="$2"
+  sid="$4"
+  [ "${sid}" = "${pid}" ] && [ "${ppid}" = "0" ] || continue
+  tag="$(printf '%s\n' "${environ}" | sed -n 's/^CC_ATTACH_ID=//p')"
+  [ -n "${tag}" ] || continue
+  tagged="${tagged} ${sid}:${tag}"
+done
+
+reaped=""
+for entry in ${tagged}; do
+  sid="${entry%%:*}"
+  tag="${entry#*:}"
+  # shellcheck disable=SC2086
+  is_live ${live_ids} && continue
+  echo "cc-reap: ending session ${sid} (CC_ATTACH_ID=${tag}): its terminal on the Mac is gone"
+  signal_session HUP "${sid}"
+  reaped="${reaped} ${sid}"
+done
+[ -n "${reaped}" ] || exit 0
+
+waited=0
+while [ "${waited}" -lt "${GRACE_SECONDS}" ]; do
+  left=""
+  for sid in ${reaped}; do
+    pgrep -s "${sid}" >/dev/null && left="${left} ${sid}"
+  done
+  [ -n "${left}" ] || exit 0
+  sleep 1
+  waited=$((waited + 1))
+done
+for sid in ${left}; do
+  echo "cc-reap: session ${sid} ignored SIGHUP for ${GRACE_SECONDS}s, sending SIGKILL" >&2
+  signal_session KILL "${sid}"
+done

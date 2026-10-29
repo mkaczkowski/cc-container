@@ -10,6 +10,10 @@
 # value is memory taken from the Mac and its simulators.
 # CC_SESSION_CPUS=8
 # CC_SESSION_MEMORY=12g
+# Guest kernel sysctls set at boot (space-separated key=value). The default
+# keeps a 256 MB reserve so virtiofs reads of the project do not fail with
+# ENOMEM under memory pressure; "" boots with the kernel's defaults.
+# CC_SESSION_SYSCTLS="vm.min_free_kbytes=262144 vm.watermark_scale_factor=200"
 
 # --- disk --------------------------------------------------------------------
 # Free GB on the Mac below which starting a container or a build is refused,

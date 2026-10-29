@@ -195,6 +195,11 @@ fi
 
 CC_SESSION_CPUS="${CC_SESSION_CPUS:-$(_cc_half_cpus)}"
 CC_SESSION_MEMORY="${CC_SESSION_MEMORY:-$(_cc_default_memory_gb)g}"
+# Guest kernel sysctls, set at boot (the guest's /proc/sys is read-only). The
+# kernel's own min_free_kbytes for 12 GB is ~14 MB, too small a reserve for the
+# 64 KB atomic buffers virtiofs allocates: under memory pressure reads of the
+# mounted project failed with ENOMEM and git stalled.
+CC_SESSION_SYSCTLS="${CC_SESSION_SYSCTLS-vm.min_free_kbytes=262144 vm.watermark_scale_factor=200}"
 CC_PROXY_URL="http://${CC_PROXY_HOST}:${CC_PROXY_PORT}"
 
 CC_MCP_DIR="${CC_MCP_DIR:-${CC_CONFIG_DIR}/mcp}"
@@ -670,7 +675,7 @@ _cc_terminfo_collect() {
 }
 
 _cc_run() {
-  local entrypoint_args=() default_flags=() agent_env=()
+  local entrypoint_args=() default_flags=()
   case "$1" in
     --shell)
       shift
@@ -681,12 +686,10 @@ _cc_run() {
       # pi never asks before a tool call, so it needs no counterpart of
       # --dangerously-skip-permissions: the VM is already its only boundary.
       shift
-      entrypoint_args=(--entrypoint /opt/cc-tools/pi-entry)
-      agent_env=(env HERDR_AGENT=pi) ;;
+      entrypoint_args=(--entrypoint /opt/cc-tools/pi-entry) ;;
     *)
       # cc-entry syncs the MCP server list, then execs claude with these args.
       entrypoint_args=(--entrypoint /opt/cc-tools/cc-entry)
-      agent_env=(env HERDR_AGENT=claude)
       local flag; flag="$(_cc_default_flags "$@")"
       [ -n "${flag}" ] && default_flags=("${flag}") ;;
   esac
@@ -702,7 +705,7 @@ _cc_run() {
   # -it needs a real TTY; fall back for piped/scripted use (e.g. claude -p).
   local tty_args=()
   if [ -t 0 ] && [ -t 1 ]; then tty_args=(-it); fi
-  _cc_awake ${agent_env+"${agent_env[@]}"} container run --rm "${tty_args[@]}" \
+  _cc_awake container run --rm "${tty_args[@]}" \
     --volume "${PWD}:${PWD}" \
     --volume "${CC_HOME_VOLUME}:/root" \
     --volume "${CC_CONTAINER_REPO}/guest:/opt/cc-tools:ro" \
@@ -776,16 +779,35 @@ _cc_mem_bytes() {
   esac
 }
 
-# Empty when the existing session has the configured CPUs and memory, else a
-# sentence saying what it has and what config.sh wants.
+# Empty when the existing session has the configured CPUs, memory and sysctls,
+# else a sentence saying what it has and what config.sh wants. Kernel arguments
+# do not show in `container inspect`, so cc-up records the sysctls in a label.
 _cc_session_size_change() {
-  local have want mem cpus
-  have="$(container inspect "${CC_SESSION_NAME}" \
+  local json have want mem cpus sysctls
+  json="$(container inspect "${CC_SESSION_NAME}")" || return 1
+  have="$(printf '%s' "${json}" \
     | jq -r '.[0].configuration.resources | "\(.memoryInBytes) \(.cpus)"')" || return 1
+  sysctls="$(printf '%s' "${json}" | jq -r '.[0].configuration.labels["cc.sysctls"] // ""')" || return 1
   want="$(_cc_mem_bytes "${CC_SESSION_MEMORY}")" || return 1
-  [ "${have}" = "${want} ${CC_SESSION_CPUS}" ] && return 0
-  read -r mem cpus <<<"${have}"
-  echo "${CC_SESSION_NAME} has $(( mem / 1048576 )) MB and ${cpus} CPUs, config wants $(( want / 1048576 )) MB and ${CC_SESSION_CPUS} CPUs"
+  if [ "${have}" != "${want} ${CC_SESSION_CPUS}" ]; then
+    read -r mem cpus <<<"${have}"
+    echo "${CC_SESSION_NAME} has $(( mem / 1048576 )) MB and ${cpus} CPUs, config wants $(( want / 1048576 )) MB and ${CC_SESSION_CPUS} CPUs"
+  elif [ "${sysctls}" != "${CC_SESSION_SYSCTLS}" ]; then
+    echo "${CC_SESSION_NAME} boots with sysctls '${sysctls}', config wants '${CC_SESSION_SYSCTLS}'"
+  fi
+}
+
+# --kernel-arg sysctl.<key>=<value> for each CC_SESSION_SYSCTLS entry, into
+# CC_SYSCTL_ARGS.
+_cc_sysctl_collect() {
+  CC_SYSCTL_ARGS=()
+  local kv
+  for kv in $(printf '%s\n' "${CC_SESSION_SYSCTLS}"); do
+    case "${kv}" in
+      *=*) CC_SYSCTL_ARGS+=(--kernel-arg "sysctl.${kv}") ;;
+      *) echo "cc-container: CC_SESSION_SYSCTLS entry '${kv}' is not <key>=<value>" >&2; return 1 ;;
+    esac
+  done
 }
 
 # The CC_REQUIRED_COMMANDS that are not on the running session's PATH, one per
@@ -849,6 +871,7 @@ cc-up() {
   fi
   if [ "${state}" = "running" ]; then
     _cc_ensure_session_commands || return 1
+    cc-reap || return 1
     echo "${CC_SESSION_NAME} already running. Attach with: $(_cc_cmd attach cc-attach)"
     [ -n "${size}" ] && echo "note: ${size}. ccdown && ccup applies it (it ends attached sessions)."
     return 0
@@ -864,12 +887,15 @@ cc-up() {
     echo "Restarting existing ${CC_SESSION_NAME}..."
     _cc_spin "restarting ${CC_SESSION_NAME}" container start "${CC_SESSION_NAME}" || return 1
   else
+    _cc_sysctl_collect || return 1
     # --init: an init as pid 1 reaps orphans (with `sleep infinity` there, every
     # exited background process stayed a zombie) and forwards stop's SIGTERM.
     _cc_spin "starting ${CC_SESSION_NAME}" container run -d --name "${CC_SESSION_NAME}" \
       --init \
       --cpus "${CC_SESSION_CPUS}" \
       --memory "${CC_SESSION_MEMORY}" \
+      ${CC_SYSCTL_ARGS+"${CC_SYSCTL_ARGS[@]}"} \
+      --label "cc.sysctls=${CC_SESSION_SYSCTLS}" \
       --volume "${PWD}:${PWD}" \
       --volume "${CC_HOME_VOLUME}:/root" \
       --volume "${CC_CONTAINER_REPO}/guest:/opt/cc-tools:ro" \
@@ -914,6 +940,31 @@ _cc_attach_workdir() {
   esac
 }
 
+# A fresh ID that tags one attached session (see guest/cc-reap).
+_cc_attach_id() {
+  uuidgen | tr '[:upper:]' '[:lower:]'
+}
+
+# Ends the attached sessions in the shared session whose terminal on the Mac is
+# gone: closing it does not hang up the guest side, so they ran until cc-down.
+# A session is live while its `container exec` client, which carries the ID in
+# its arguments, still runs on the Mac.
+cc-reap() {
+  [ "$(_cc_session_state)" = "running" ] || return 0
+  local procs live
+  # An empty listing would make every session look stale, so a failed ps stops here.
+  procs="$(ps -axo args=)" || {
+    echo "cc-reap: ps on the Mac failed, so the live sessions are unknown; nothing was ended" >&2
+    return 1
+  }
+  live="$(printf '%s\n' "${procs}" | sed -n 's/.*CC_ATTACH_ID=\([0-9a-f-]*\).*/\1/p' | sort -u | tr '\n' ' ')"
+  # shellcheck disable=SC2086
+  container exec "${CC_SESSION_NAME}" /opt/cc-tools/cc-reap ${live} || {
+    echo "cc-reap: could not end the stale sessions in ${CC_SESSION_NAME}" >&2
+    return 1
+  }
+}
+
 cc-attach() {
   _cc_disk_guard warn || return 1
   if [ "$(_cc_session_state)" != "running" ]; then
@@ -931,10 +982,9 @@ cc-attach() {
   local workdir; workdir="$(_cc_attach_workdir)" || return 1
   _cc_attach_guard || return 1
   container exec "${CC_SESSION_NAME}" /opt/cc-tools/cc-mcp-sync || return 1
-  # HERDR_AGENT tells herdr (if this runs in a herdr pane) that the foreground
-  # job is Claude Code: the claude process itself is inside the VM, invisible
-  # to herdr's host-side process detection.
-  _cc_awake env HERDR_AGENT=claude container exec "${tty_args[@]}" --env TERM \
+  cc-reap || return 1
+  _cc_awake container exec "${tty_args[@]}" --env TERM \
+    --env "CC_ATTACH_ID=$(_cc_attach_id)" \
     --workdir "${workdir}" \
     "${CC_SESSION_NAME}" "${CC_ATTACH_COMMAND[@]}" ${default_flags+"${default_flags[@]}"} "$@"
 }
@@ -959,7 +1009,9 @@ pi-attach() {
     workdir="${mount}/${2:?pi-attach: -C needs a directory relative to the project root}"
     shift 2
   fi
-  _cc_awake env HERDR_AGENT=pi container exec "${tty_args[@]}" --env TERM \
+  cc-reap || return 1
+  _cc_awake container exec "${tty_args[@]}" --env TERM \
+    --env "CC_ATTACH_ID=$(_cc_attach_id)" \
     --workdir "${workdir}" \
     "${CC_SESSION_NAME}" pi "$@"
 }
@@ -1037,56 +1089,6 @@ cc-profile() {
     "${sh}" "${flags[@]}" -c '. "$1" || exit 1; shift; "$@"' cc-profile \
     "${repo}/bin/cc-container.sh" "${fn}" "$@"
 }
-
-# From a herdr pane: create a git worktree under <repo>/.claude/worktrees/<name>
-# (branch worktree-<name>, as `claude --worktree` names it), open it as a herdr
-# workspace grouped under the repo, and run <attach> (ccx or pix) in it. The
-# worktree is created on the Mac; it is valid in the guest because the project
-# is mounted at the same path there. herdr's own "New worktree" places
-# checkouts in [worktrees] directory, outside the mount, where the guest cannot
-# see them.
-# Usage: _cc_worktree <caller> <attach> <name> [agent args...]
-_cc_worktree() {
-  local caller="$1" attach="$2"
-  shift 2
-  if [ -z "${1:-}" ]; then
-    echo "${caller}: usage: ${caller} <name> [agent args...]" >&2
-    return 1
-  fi
-  local name="$1"
-  shift
-  if [ "${HERDR_ENV:-}" != "1" ]; then
-    echo "${caller}: run this from a herdr pane (HERDR_ENV is not 1); it opens the worktree as a herdr workspace" >&2
-    return 1
-  fi
-  if [ "$(_cc_session_state)" != "running" ]; then
-    echo "${caller}: ${CC_SESSION_NAME} is not running. Start it with $(_cc_cmd up cc-up)." >&2
-    return 1
-  fi
-  local common root mount
-  common="$(git rev-parse --path-format=absolute --git-common-dir)" || return 1
-  root="$(dirname "${common}")"
-  mount="$(_cc_session_mount)" || return 1
-  case "${root}/" in
-    "${mount}"/*) ;;
-    *) echo "${caller}: repo ${root} is outside the session mount ${mount}, so the guest could not see the worktree" >&2
-       return 1 ;;
-  esac
-  local created pane
-  created="$(herdr worktree create --cwd "${root}" --branch "worktree-${name}" \
-    --path "${root}/.claude/worktrees/${name}" --label "${name}" --focus)" || return 1
-  pane="$(printf '%s' "${created}" | jq -r '.result.root_pane.pane_id // empty')"
-  if [ -z "${pane}" ]; then
-    echo "${caller}: herdr worktree create returned no root pane id: ${created}" >&2
-    return 1
-  fi
-  local cmd="${attach}"
-  [ "$#" -gt 0 ] && cmd="${attach} $(printf '%q ' "$@")"
-  herdr pane run "${pane}" "${cmd}"
-}
-
-cc-worktree() { _cc_worktree cc-worktree ccx "$@"; }
-pi-worktree() { _cc_worktree pi-worktree pix "$@"; }
 
 # Running containers other than the shared session and the build helper, i.e.
 # anything that might still need the proxy or the sim shim.
@@ -1671,12 +1673,10 @@ pi-container-upgrade() {
 # shells and scripts too (zsh does not expand aliases there).
 ccx()    { cc-attach "$@"; }
 ccxs()   { cc-attach-shell "$@"; }
-ccwt()   { cc-worktree "$@"; }
 ccup()   { cc-up "$@"; }
 ccdown() { cc-down "$@"; }
 ccst()   { cc-status "$@"; }
 ccrun()  { cc-container "$@"; }
 ccsh()   { cc-shell "$@"; }
 pix()    { pi-attach "$@"; }
-piwt()   { pi-worktree "$@"; }
 pirun()  { pi-container "$@"; }
