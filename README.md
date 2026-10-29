@@ -63,9 +63,8 @@ own image layer) need files `install.sh` does not create; see
 | `cc-attach` | `ccx` | Attach a Claude Code session (one per terminal) |
 | `pi-attach` | `pix` | Attach a [pi](#running-pi-beside-claude-code) session instead |
 | `cc-attach-shell` | `ccxs` | Bash prompt in the shared container |
-| `cc-worktree` | `ccwt` | From a [herdr](#running-sessions-in-herdr) pane: new worktree, grouped, with `ccx` started in it |
-| `pi-worktree` | `piwt` | The same, with `pix` started in it |
 | `cc-status` | `ccst` | Runtime, proxy, shim, and container state |
+| `cc-reap` | | End attached sessions whose terminal on the Mac is gone (`ccx`, `pix` and `ccup` run it too) |
 | `cc-exec` | | Run one command (argv, not a shell string) in the shared container, from a script |
 | `cc-profile` | | Run a verb against a [profile](#profiles-a-second-isolated-container): `cc-profile <name> up` |
 | `cc-down` | `ccdown` | Stop and remove the shared container, then trim its home volume |
@@ -99,7 +98,10 @@ under `caffeinate -i`, so idle sleep cannot suspend the VM in the middle of an
 unattended agent run. The Mac sleeps as usual once the session ends. A closed
 lid still sleeps the Mac unless it is on power with an external display.
 
-The session still ends with its terminal. For a run you want to leave and come
+The session ends with its terminal, though not at once: closing the Mac side
+of `container exec` does not hang up the guest, so the agent keeps running
+until the next `ccx`, `pix` or `ccup`, which ends every attached session whose
+terminal is gone (`cc-reap` does it on demand). For a run you want to leave and come
 back to, start `pix`/`ccx` inside tmux on the Mac and detach. For a long
 command, the image has tmux too: `ccxs`, then
 `tmux new -s <name> '<command>; exec bash'`, detach with `Ctrl-b d`, and
@@ -182,8 +184,7 @@ paths into worktree links, so a worktree only works where those paths exist.
 The project is mounted at the same path in the guest as on the Mac, which makes
 a worktree valid on both sides whichever side created it: host git never lists a
 guest-made worktree as `prunable` (so `git worktree prune` and `git gc` leave it
-alone), and a host-made one, such as [`ccwt`](#running-sessions-in-herdr)
-creates, works in the guest. (Under the old `/workspace` mount each side's
+alone), and a host-made one works in the guest. (Under the old `/workspace` mount each side's
 worktrees were broken on the other; a worktree made then can be relinked with
 `git worktree repair <path>` while its metadata still exists.)
 
@@ -384,43 +385,6 @@ fetch.
 Worktrees also add to the disk figure above, and unlike container state they land
 on **host** disk through the bind mount, so `ccdown` does not reclaim them.
 
-### Running sessions in herdr
-
-[herdr](https://herdr.dev) is a terminal multiplexer that tracks each agent's
-state (working, blocked, idle) and groups git worktrees under their repo. Two
-things make it work with the container:
-
-**Agent detection.** herdr recognises an agent by the processes in the pane's
-foreground job, and the `claude` process is inside the VM, invisible to it. So
-`ccx`, `ccrun`, `pix` and `pirun` set `HERDR_AGENT=claude` (or `pi`) on the
-host-side launcher, which herdr reads from any process in that job and then
-reads the agent's screen as usual. `herdr agent explain <pane>` shows what it
-matched. Do not run `herdr integration install claude`: it writes a hook into
-the Mac's `~/.claude`, not the guest's, and the guest cannot reach herdr's
-socket anyway. Its only gain is resuming sessions after a herdr restart, which
-`ccx -c` covers by hand.
-
-**Worktree grouping.** From a herdr pane inside the project:
-
-```bash
-ccwt feat-auth                 # .claude/worktrees/feat-auth on worktree-feat-auth, ccx started in it
-ccwt fix-123 --model opus      # extra args go to claude
-piwt feat-auth                 # the same with pix; extra args go to pi
-```
-
-It runs `herdr worktree create` on the Mac (grouped under the repo's workspace),
-then `ccx` (or `pix` for `piwt`) in the new pane, which starts in that worktree. Worktrees made by
-`ccx --worktree` group too: open them with herdr's "Open worktree..." or
-`herdr worktree open --path .claude/worktrees/<name>`. Avoid herdr's own "New
-worktree": it places the checkout under `[worktrees] directory`
-(`~/.herdr/worktrees` by default), outside the mount, where the guest cannot see
-it. The project's `.worktreeinclude` is applied by Claude Code only for its own
-`--worktree`, so a project that needs those files in a `ccwt` or `piwt` worktree should
-copy them in its bootstrap hook.
-
-Grouping adds nothing to memory: it is one herdr server on the Mac and the same
-shared container. Each agent you run still costs what it costs.
-
 ## Running pi beside Claude Code
 
 The image also ships the [pi coding agent](https://pi.dev)
@@ -473,9 +437,8 @@ config in `~/.config/cc-container/pi/` instead (below).
   `settings.json` (for example `"skills": ["/opt/cc-pi/skills"]`). A new
   directory needs `ccdown && ccup` to be mounted.
 - **Worktrees** are Claude Code's feature; pi has no `--worktree`. Two pi
-  sessions in one checkout share files, so isolate them with
-  [`piwt`](#running-sessions-in-herdr) from a herdr pane, or create a worktree
-  in `ccxs` and start pi in it with `pix -C <worktree path relative to the
+  sessions in one checkout share files, so isolate them by creating a worktree
+  in `ccxs` and starting pi in it with `pix -C <worktree path relative to the
   project>`.
 - **`mac-sim`** is a plain command on the guest `PATH`, so pi can call it like
   any other tool.
@@ -637,7 +600,18 @@ work in the guest gets killed (`cat /sys/fs/cgroup/memory.events` shows
 stopped session whose size differs from the config, and for a running one says
 what differs (`ccdown`, then `ccup`, applies it). A shell keeps the values
 `config.sh` had when it started, so after editing it `ccup` refuses to run in an
-older shell; open a new terminal. Override in `config.sh` or per invocation:
+older shell; open a new terminal.
+
+The guest kernel boots with `CC_SESSION_SYSCTLS` (default
+`vm.min_free_kbytes=262144 vm.watermark_scale_factor=200`), passed as
+`--kernel-arg sysctl.<key>=<value>` because `/proc/sys` is read-only inside.
+The kernel's own reserve for 12 GB is about 14 MB, too little for the 64 KB
+atomic buffers virtiofs allocates: under memory pressure reads of the mounted
+project failed with `ENOMEM`, `dmesg` showed `page allocation failure: order:4`,
+and git stalled. A changed value is treated like a changed size. Set it to ""
+to boot with the kernel's defaults.
+
+Override in `config.sh` or per invocation:
 
 ```bash
 CC_SESSION_MEMORY=12g CC_SESSION_CPUS=10 ccup
