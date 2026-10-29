@@ -259,7 +259,7 @@ mac-sim sim delete mine
 one, named `<project>-<name>`, and then does what the project's `simulators`
 block declares. `--type <model>` makes another model on that runtime instead,
 e.g. `mac-sim sim create mine-ipad --type "iPad Pro 13-inch (M4)"` for the tablet
-layout: the app copied from the shared simulator runs on it unchanged. A model the
+layout: the cached build of the shared app runs on it unchanged. A model the
 runtime cannot run is refused with the ones it can, and a watch pairs only with an
 iPhone, so `--with-watch` takes no iPad:
 
@@ -274,10 +274,10 @@ iPhone, so `--with-watch` takes no iPad:
 }
 ```
 
-- **`clone_app`** installs a copy of `defaults.bundle_id` from the shared
-  simulator, so a worktree with no native project still gets a binary. The shared
-  simulator must be booted with the app installed. It is the shared build: a
-  native change still has to be built, on either device. A just-booted iOS 26
+- **`clone_app`** installs the project's cached build of `defaults.bundle_id`
+  (see "The app cache" below), so a worktree with no native project still gets a
+  binary. Without a cached build `sim create` is refused. It is the shared build:
+  a native change still has to be built, on either device. A just-booted iOS 26
   simulator refuses its first install for a few seconds ("Failed to create
   promise"), so that refusal is retried for up to 25 seconds; any other install
   error fails the create at once.
@@ -297,6 +297,27 @@ iPhone, so `--with-watch` takes no iPad:
   at start at the private bundler; the global domain survives an app-state
   reset, the app's own domain does not.
 - **`max`** caps how many exist. Each booted simulator costs a few GB of RAM.
+
+#### The app cache
+
+A private simulator never copies from the shared one. It installs the build last
+saved to the project's app cache, so the shared simulator can be shut down once
+the build is saved, and a later install there by another checkout does not
+change what private simulators get:
+
+```
+mac-sim run                         # build and install on the shared simulator
+mac-sim app-cache save              # copy that app into the cache, as a new build id
+mac-sim shutdown                    # optional: private simulators no longer need it
+mac-sim app-cache status [--json]   # the current build, and the shared simulator's state
+```
+
+`save` needs the shared simulator booted with the app installed, and runs under
+its claim, like `run`: another checkout's build is never saved without `-f`. The
+copy is written beside the cache and renamed in, so a half copy is never
+current. The previous build is kept for one more save. The cache lives in
+`~/.local/state/cc-container/mac-sim-apps/<project>/`. An embedded watch app is
+part of the cached bundle.
 
 `--sim <name>` (or `MAC_SIM_SIM`) then targets it on any command, built-in or
 declared. A private simulator has its own claim, so it never contends with the
@@ -667,6 +688,7 @@ mac-sim android status --json    # also with -d NAME
 mac-sim android list --json
 mac-sim android lock --json      # release and reset too
 mac-sim memory --json
+mac-sim app-cache status --json  # save --json too
 ```
 
 Exit codes are the same as without `--json`: `status --json` exits 0 only when
@@ -732,6 +754,14 @@ one entry per private simulator, sorted by name: `{"name", "state", "udid",
 `device_type` the model from `sim create --type`, or null (the shared simulator's). `state` is simctl's (`Booted`,
 `Shutdown`, ...), `creating` while `sim create` runs, or `gone` when the
 simulator was deleted outside mac-sim.
+
+`app-cache status` answers `{"schemaVersion", "project", "current", "manifest",
+"builds", "base"}`: `current` is the build id private simulators install (null
+before the first save), `manifest` its `{"id", "bundle_id", "app", "at",
+"workdir", "device", "runtime"}` (null with it), `builds` the ids kept, oldest
+first, and `base` the shared simulator as `{"name", "udid", "state"}` (`state` is
+simctl's). `app-cache save` answers `{"schemaVersion", "project", "current",
+"manifest"}` for the build it saved.
 
 `android list` answers `{"schemaVersion", "project", "package", "default",
 "emulators": [{"name", "avd", "serial", "port", "default"}], "avds": [...],
