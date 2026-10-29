@@ -91,6 +91,17 @@ SIM_DIR = Path(os.environ.get(
     os.path.expanduser("~/.local/state/cc-container/mac-sim-sims"),
 ))
 
+# Builds of the shared simulator's app that private simulators install from, one
+# directory per project: <id>/ holds the .app and manifest.json, `current` names
+# the newest. With a build here, the shared simulator can stay shut down.
+APP_CACHE_DIR = Path(os.environ.get(
+    "MAC_SIM_APP_CACHE_DIR",
+    os.path.expanduser("~/.local/state/cc-container/mac-sim-apps"),
+))
+# The previous build stays one save longer, so a `sim create` that read `current`
+# just before a save still finds its bundle.
+APP_CACHE_KEEP = 2
+
 # Live output of project commands, relative to the caller's checkout: inside the
 # bind mount, so the guest reads it while the command is still running.
 LOG_SUBDIR = ".mac-sim/logs"
@@ -138,6 +149,7 @@ BUILTIN_VERBS = [
     "install", "uninstall", "launch", "terminate", "screenshot", "openurl",
     "appearance", "logs", "xcodebuild", "project_command", "lock",
     "sim_create", "sim_delete", "sim_list", "pull", "status", "browse", "memory",
+    "app_cache_save", "app_cache_status",
 ] + sorted(WATCH_VERBS) + sorted(DEVICE_VERBS)
 
 # Where `watch_build` puts its products, relative to the checkout.
@@ -148,13 +160,15 @@ LAUNCH_ARG_RE = re.compile(r"^[A-Za-z0-9._:=-][A-Za-z0-9._:=/-]{0,127}$")
 MAX_LAUNCH_ARGS = 16
 
 # Verbs made of several host steps; see the "Direct verbs" section.
-DIRECT_VERBS = {"sim_create", "sim_delete", "sim_list", "pull", "status"}
+DIRECT_VERBS = {"sim_create", "sim_delete", "sim_list", "pull", "status",
+                "app_cache_save", "app_cache_status"}
 
 # Request fields an older shim would silently ignore, turning "act on my private
 # simulator" into "act on the shared one". The guest checks this list before
 # sending such a field, so a stale shim is reported instead of obeyed wrongly.
 FEATURES = ["appearance", "locale", "pull", "sim", "progress", "status", "android",
-            "android_devices", "browse", "json", "watch", "device", "sim_type", "memory"]
+            "android_devices", "browse", "json", "watch", "device", "sim_type", "memory",
+            "app_cache"]
 
 # The shape of the "data" object that status, lock, sim_list, memory and android list
 # reply with, for `mac-sim <verb> --json`. Adding a field keeps the version;
@@ -1574,6 +1588,109 @@ def create_paired_watch(device_name, phone_udid, cfg):
     return watch_udid
 
 
+def _app_cache_dir(project_name):
+    return APP_CACHE_DIR / project_name
+
+
+def cached_app(project_name):
+    """The project's current cached build as (id, manifest, .app path), or None
+    when nothing was saved."""
+    pdir = _app_cache_dir(project_name)
+    try:
+        build = (pdir / "current").read_text().strip()
+    except FileNotFoundError:
+        return None
+    manifest_file = pdir / build / "manifest.json"
+    try:
+        manifest = json.loads(manifest_file.read_text())
+    except FileNotFoundError:
+        raise HostFailure(["app_cache"], 1,
+                          f"{pdir / 'current'} names build {build!r}, which has no "
+                          f"{manifest_file}; save a build again (`mac-sim app-cache save`)")
+    return build, manifest, pdir / build / manifest["app"]
+
+
+def require_cached_app(project_name):
+    found = cached_app(project_name)
+    if found is None:
+        raise Rejected(
+            f"no cached build of {project_name}'s app; build it on the shared simulator "
+            f"(`mac-sim run`), then `mac-sim app-cache save` in the same checkout")
+    return found
+
+
+def manifest_data(manifest):
+    """A manifest as the JSON answers carry it: its checkout as the guest sees it."""
+    data = {k: v for k, v in manifest.items() if k != "guest_workdir"}
+    data["workdir"] = manifest.get("guest_workdir") or manifest["workdir"]
+    return data
+
+
+def app_cache_save(body, project, base):
+    """Copy the app installed on the shared simulator into the project's cache and
+    make it current. Runs under the shared simulator's claim (see _direct), so no
+    other checkout can install over the build between its run and this copy."""
+    pname = project["name"]
+    bundle = project["defaults"].get("bundle_id")
+    if not bundle:
+        raise Rejected(f"project {pname!r} sets no defaults.bundle_id, so there is no app to cache")
+    source_udid = resolve_device({}, project)
+    source = simctl_devices()[source_udid]
+    if source["state"] != "Booted":
+        raise Rejected(f"the shared simulator {source['name']!r} is not booted, so its "
+                       f"installed app cannot be read. Build it there first (`mac-sim run`).")
+    try:
+        app = Path(run_host(["xcrun", "simctl", "get_app_container",
+                             source_udid, bundle, "app"], 60))
+    except HostFailure as exc:
+        raise Rejected(f"{bundle} is not installed on the shared simulator "
+                       f"{source['name']!r}; build it there first (`mac-sim run`). [{exc}]")
+    build = f"{time.strftime('%Y%m%d-%H%M%S')}-{os.urandom(2).hex()}"
+    manifest = {"id": build, "bundle_id": bundle, "app": app.name, "at": time.time(),
+                "workdir": str(base), "guest_workdir": to_guest_path(project, base),
+                "device": source["name"], "runtime": source["runtime"]}
+    pdir = _app_cache_dir(pname)
+    pdir.mkdir(parents=True, exist_ok=True)
+    # Written beside its final place and renamed in, so a half copy is never current.
+    tmp = pdir / f".tmp-{build}"
+    try:
+        run_host(["ditto", str(app), str(tmp / app.name)], 300)
+        (tmp / "manifest.json").write_text(json.dumps(manifest, indent=2))
+        tmp.rename(pdir / build)
+    except BaseException:
+        shutil.rmtree(tmp, ignore_errors=True)
+        raise
+    current = pdir / "current.tmp"
+    current.write_text(build)
+    current.replace(pdir / "current")
+    builds = sorted(p.name for p in pdir.iterdir() if p.is_dir() and not p.name.startswith("."))
+    for old in builds[:-APP_CACHE_KEEP]:
+        shutil.rmtree(pdir / old)
+    return (f"cached {bundle} from {source['name']!r} as build {build}; private "
+            f"simulators install it from now on",
+            {"data": {"project": pname, "current": build, "manifest": manifest_data(manifest)}})
+
+
+def app_cache_status(body, project, base):
+    pname = project["name"]
+    found = cached_app(pname)
+    source = simctl_devices()[resolve_device({}, project)]
+    pdir = _app_cache_dir(pname)
+    builds = (sorted(p.name for p in pdir.iterdir() if p.is_dir() and not p.name.startswith("."))
+              if pdir.is_dir() else [])
+    data = {"project": pname, "current": found[0] if found else None,
+            "manifest": manifest_data(found[1]) if found else None, "builds": builds,
+            "base": {"name": source["name"], "udid": source["udid"], "state": source["state"]}}
+    if found:
+        m = found[1]
+        text = (f"{pname}: current build {found[0]} ({m['bundle_id']}, from "
+                f"{m.get('guest_workdir') or m['workdir']}, "
+                f"{int(time.time() - float(m['at'])) // 60}m old)")
+    else:
+        text = f"{pname}: no cached build (`mac-sim run`, then `mac-sim app-cache save`)"
+    return f"{text}\n  shared simulator {source['name']!r}: {source['state']}", {"data": data}
+
+
 def sim_create(body, project, base):
     cfg = simulators_config(project)
     pname = project["name"]
@@ -1585,7 +1702,7 @@ def sim_create(body, project, base):
         raise Rejected("'with_watch' must be true or false")
     watch_cfg = watch_config(project) if with_watch else None
     # Another model than the shared simulator's (an iPad beside the iPhone), on
-    # the same runtime, so the shared simulator's app runs on it unchanged.
+    # the same runtime, so the cached build of its app runs on it unchanged.
     device_type = field(body, "device_type", DEVICE_RE, required=False)
     if device_type and with_watch and "iPhone" not in device_type:
         raise Rejected(f"a watch pairs only with an iPhone, not {device_type!r}; "
@@ -1618,23 +1735,12 @@ def sim_create(body, project, base):
     try:
         source_udid = resolve_device({}, project)
         source = simctl_devices()[source_udid]
-        bundle = project["defaults"].get("bundle_id")
-        app = None
+        app, build = None, None
         if cfg.get("clone_app", True):
-            if not bundle:
-                raise Rejected("simulators.clone_app needs defaults.bundle_id")
-            if source["state"] != "Booted":
-                raise Rejected(
-                    f"the shared simulator {source['name']!r} is not booted, so its "
-                    f"installed app cannot be copied. `mac-sim boot` it first.")
-            try:
-                app = run_host(["xcrun", "simctl", "get_app_container",
-                                source_udid, bundle, "app"], 60)
-            except HostFailure as exc:
-                raise Rejected(
-                    f"{bundle} is not installed on the shared simulator "
-                    f"{source['name']!r}, so there is no build to copy. Install one "
-                    f"there first (the project's build command). [{exc}]")
+            # From the app cache, never the shared simulator itself, which may be
+            # shut down and may since hold another checkout's build.
+            build, _, cached = require_cached_app(pname)
+            app = str(cached)
 
         type_id = (sim_device_type(device_type, source["runtime"]) if device_type
                    else source["deviceTypeIdentifier"])
@@ -1698,12 +1804,12 @@ def sim_create(body, project, base):
              f"  udid: {udid}",
              f"  device: {device_type or source['name']}",
              f"  bundler port: {port}",
-             f"  app: {'copied from the shared simulator' if app else 'none installed'}"]
+             f"  app: {f'build {build} from the app cache' if app else 'none installed'}"]
     if watch_udid:
         lines.append(f"  watch: {watch_udid} (paired, booted; shares this claim)")
     lines.append(f"Target it with --sim {name} on any command.")
     return "\n".join(lines + notes), {"sim": name, "udid": udid, "port": port,
-                                      "watch_udid": watch_udid}
+                                      "watch_udid": watch_udid, "app_build": build}
 
 
 def sim_delete(body, project, base):
@@ -1952,7 +2058,8 @@ def host_memory():
 
 
 DIRECT = {"sim_create": sim_create, "sim_delete": sim_delete,
-          "sim_list": sim_list, "pull": pull, "status": status}
+          "sim_list": sim_list, "pull": pull, "status": status,
+          "app_cache_save": app_cache_save, "app_cache_status": app_cache_status}
 
 
 # --------------------------------------------------------------------------
@@ -2666,6 +2773,13 @@ class Handler(BaseHTTPRequestHandler):
                 claim = Claim(f"{project['name']}@{sim_name}", base, verb,
                               bool(body.get("force")), self.config.lock_ttl,
                               guest_workdir=to_guest_path(project, base)).acquire()
+            elif verb == "app_cache_save" and self.config.lock_enabled:
+                # The shared simulator's claim: the build copied is the one this
+                # checkout installed there.
+                previous_owner = read_owner(project["name"])
+                claim = Claim(project["name"], base, verb,
+                              bool(body.get("force")), self.config.lock_ttl,
+                              guest_workdir=to_guest_path(project, base)).acquire()
             log(f"RUN {verb}: {body.get('name') or body.get('path') or ''}")
             if body.get("platform") == "android":
                 if "sim" in body:
@@ -2692,9 +2806,10 @@ class Handler(BaseHTTPRequestHandler):
         finally:
             if claim and claim.fh is not None:
                 # A created simulator belongs to its creator and a deleted one to
-                # nobody. A request that failed changed nothing, so the record
-                # goes back to what it was before this request claimed it.
-                claim.aborted = not (done and verb == "sim_create")
+                # nobody; the shared simulator stays its builder's after a save. A
+                # request that failed changed nothing, so the record goes back to
+                # what it was before this request claimed it.
+                claim.aborted = not (done and verb in ("sim_create", "app_cache_save"))
                 claim.release()
                 if claim.aborted:
                     if previous_owner and not done:

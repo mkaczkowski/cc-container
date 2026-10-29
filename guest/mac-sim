@@ -28,6 +28,10 @@ Built-in simulator verbs work for any project:
                                          # https prefixes the host config allows)
   mac-sim appearance [light|dark]       # set, or print the current one
   mac-sim build                         # xcodebuild the project's workspace
+  mac-sim app-cache save [--json]       # cache the app on the shared simulator:
+                                         # private simulators install from it
+  mac-sim app-cache status [--json]     # the current cached build, and whether
+                                         # the shared simulator is booted
 
 Project commands come from the host config (`mac-sim commands` lists them):
 
@@ -140,7 +144,7 @@ ANDROID_DEVICE = os.environ.get("MAC_SIM_ANDROID_DEVICE")
 BUILTINS = {"list", "booted", "runtimes", "boot", "shutdown", "gui", "install",
             "launch", "terminate", "uninstall", "openurl", "appearance", "screenshot", "logs",
             "build", "commands", "projects", "lock", "release", "reset", "sim", "pull",
-            "status", "android", "browse", "watch", "device", "memory"}
+            "status", "android", "browse", "watch", "device", "memory", "app-cache"}
 
 # `mac-sim android <verb>`: built in. Any other word after `android` is the
 # project command `android-<word>`.
@@ -1097,6 +1101,12 @@ def main():
     sp = sims.add_parser("list", parents=[nested])
     sp.add_argument("--json", action="store_true",
                     help="print one JSON object instead of text")
+    p = add("app-cache")
+    caches = p.add_subparsers(dest="cache_cmd", required=True)
+    caches.add_parser("save", parents=[nested]).add_argument(
+        "--json", action="store_true", help="print one JSON object instead of text")
+    caches.add_parser("status", parents=[nested]).add_argument(
+        "--json", action="store_true", help="print one JSON object instead of text")
     p = add("watch")
     watch_subs = p.add_subparsers(dest="watch_cmd", required=True)
     watch_subs.add_parser("build", parents=[nested]).add_argument(
@@ -1203,6 +1213,20 @@ def main():
                   f"about a minute{' or two' if a.with_watch else ''}", file=sys.stderr)
         if getattr(a, "json", False):
             require_json()
+            return emit_json(call(payload))
+        return emit(call(payload))
+
+    if a.cmd == "app-cache":
+        health = require_feature("app_cache", "`mac-sim app-cache`")
+        payload = {"verb": f"app_cache_{a.cache_cmd}"}
+        if a.project:
+            payload["project"] = a.project
+        if a.workdir:
+            payload["workdir"] = guest_abspath(a.workdir)
+        if a.force:
+            payload["force"] = True
+        if a.json:
+            require_json(health)
             return emit_json(call(payload))
         return emit(call(payload))
 
