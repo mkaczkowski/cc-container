@@ -781,7 +781,8 @@ _cc_mem_bytes() {
 
 # Empty when the existing session has the configured CPUs, memory and sysctls,
 # else a sentence saying what it has and what config.sh wants. Kernel arguments
-# do not show in `container inspect`, so cc-up records the sysctls in a label.
+# do not show in `container inspect`, so cc-up records the sysctls in a label,
+# with each `=` as `:` (container rejects a label value containing `=`).
 _cc_session_size_change() {
   local json have want mem cpus sysctls
   json="$(container inspect "${CC_SESSION_NAME}")" || return 1
@@ -792,8 +793,8 @@ _cc_session_size_change() {
   if [ "${have}" != "${want} ${CC_SESSION_CPUS}" ]; then
     read -r mem cpus <<<"${have}"
     echo "${CC_SESSION_NAME} has $(( mem / 1048576 )) MB and ${cpus} CPUs, config wants $(( want / 1048576 )) MB and ${CC_SESSION_CPUS} CPUs"
-  elif [ "${sysctls}" != "${CC_SESSION_SYSCTLS}" ]; then
-    echo "${CC_SESSION_NAME} boots with sysctls '${sysctls}', config wants '${CC_SESSION_SYSCTLS}'"
+  elif [ "${sysctls}" != "${CC_SESSION_SYSCTLS//=/:}" ]; then
+    echo "${CC_SESSION_NAME} boots with sysctls '${sysctls//:/=}', config wants '${CC_SESSION_SYSCTLS}'"
   fi
 }
 
@@ -895,7 +896,7 @@ cc-up() {
       --cpus "${CC_SESSION_CPUS}" \
       --memory "${CC_SESSION_MEMORY}" \
       ${CC_SYSCTL_ARGS+"${CC_SYSCTL_ARGS[@]}"} \
-      --label "cc.sysctls=${CC_SESSION_SYSCTLS}" \
+      --label "cc.sysctls=${CC_SESSION_SYSCTLS//=/:}" \
       --volume "${PWD}:${PWD}" \
       --volume "${CC_HOME_VOLUME}:/root" \
       --volume "${CC_CONTAINER_REPO}/guest:/opt/cc-tools:ro" \
