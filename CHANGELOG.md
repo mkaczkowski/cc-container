@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- **The train container runs pinned engine releases again.** The machine.json
+  the train profile writes for a new home volume no longer sets
+  `engine.follow`, so each train runs the trainyard release its repo pins
+  (`pnpm release` in trainyard moves the pins). An existing container keeps
+  its file: remove the key from `/root/.config/trainyard/machine.json`.
 - **A closed terminal no longer leaves its session running in the shared
   container.** Closing the Mac side of `container exec -it` does not hang up
   the guest, so every `ccx`/`pix` whose terminal was closed kept running until
