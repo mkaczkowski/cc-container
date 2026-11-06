@@ -1,0 +1,9 @@
+{
+  "engine": "0.7.3",
+  "name": "cc-container",
+  "taskSource": {
+    "kind": "file",
+    "path": ".train/queue.json"
+  },
+  "gates": {}
+}
