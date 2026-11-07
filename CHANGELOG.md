@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- **The train profile repairs a trainyard engine corrupted by an unclean
+  stop.** After a Mac restart or a crash, a freshly fetched engine in the home
+  volume could be left with empty files, and `attach` then did nothing without
+  an error (`trainyard` exited 0 silently). A new `CC_STARTUP_COMMAND` setting
+  runs a repair inside the session at every `cc-up`; the train profile uses it
+  to remove such an engine (it is fetched again on first use). A failing
+  command fails `cc-up`.
 - **The train container runs pinned engine releases again.** The machine.json
   the train profile writes for a new home volume no longer sets
   `engine.follow`, so each train runs the trainyard release its repo pins

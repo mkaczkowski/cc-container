@@ -136,3 +136,19 @@ CC_SETUP_COMMAND="set -o pipefail; d=\$(mktemp -d) \
   && mkdir -p /root/.config/trainyard \
   && { [ -e ${_train_container_json} ] || printf '{\"maxSessions\": 4, \"repos\": [%s]}\n' '${_train_repos_json}' > ${_train_container_json}; }"
 unset _train_checkout _train_container_json _train_repos_json
+
+# --- what an unclean stop corrupts ---------------------------------------------
+# A Mac restart or a crash stops the VM without flushing its file system, and
+# ext4 can keep a file written just before as an empty one. trainyard keeps the
+# engine releases it fetches in the home volume (a clone renamed into place), and
+# an empty engine exits 0 without a word: `trainyard claude` then prints nothing
+# and `attach` seems to do nothing. At every `up`, remove an engine whose
+# package.json or entry point is empty; the launcher fetches it again on first use.
+CC_STARTUP_COMMAND='for d in /root/.local/state/trainyard/engines/*/; do
+  d=${d%/}; [ -d "$d" ] || continue
+  case "${d##*/}" in *.tmp-*) continue ;; esac
+  p=$d/packages/engine; [ -e "$p/package.json" ] || p=$d
+  [ -s "$p/package.json" ] && [ -s "$p/bin/trainyard.mjs" ] && continue
+  echo "removing trainyard engine cache $d: its package.json or entry point is empty (an unclean stop); it is fetched again on first use" >&2
+  rm -rf "$d" || exit 1
+done'
