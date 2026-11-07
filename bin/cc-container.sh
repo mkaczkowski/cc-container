@@ -603,8 +603,10 @@ cc-sim-up() {
     || (umask 077; head -c 32 /dev/urandom | xxd -p -c 64 > "${CC_SIM_TOKEN_FILE}")
   MAC_SIM_CONFIG="${CC_SIM_CONFIG}" MAC_SIM_TOKEN_FILE="${CC_SIM_TOKEN_FILE}" \
     python3 "${CC_CONTAINER_REPO}/host/mac-sim-shim.py" >"${CC_SIM_LOG}" 2>&1 &
+  # Up to 10s: a cold Python start (first run after an upgrade or a long idle)
+  # took over 3s, and a false failure here aborts cc-up.
   local _
-  for _ in $(seq 1 30); do
+  for _ in $(seq 1 100); do
     _cc_listening "${port}" && break
     sleep 0.1
   done
@@ -1138,9 +1140,12 @@ _cc_session_remove() {
   if ! _cc_timeout "${CC_SESSION_STOP_TIMEOUT:-30}" container stop "${CC_SESSION_NAME}" 2>/dev/null; then
     echo "cc-container: container stop ${CC_SESSION_NAME} did not finish in ${CC_SESSION_STOP_TIMEOUT:-30}s; its VM may be wedged (exec and logs would hang too). Trying container kill..." >&2
     if ! _cc_timeout "${CC_SESSION_STOP_TIMEOUT:-30}" container kill "${CC_SESSION_NAME}" 2>/dev/null; then
-      echo "cc-container: container kill ${CC_SESSION_NAME} did not finish either; the runtime itself is stuck, not just the guest. Find its VM process and kill it, then restart the runtime:
+      echo "cc-container: container kill ${CC_SESSION_NAME} did not finish either; the runtime itself is stuck, not just the guest. Check first whether it is already gone (a wedged stop can finish late):
+  container list --all
+If it is still listed, find its VM process and kill it:
   ps aux | grep \"container-runtime-linux.*--uuid ${CC_SESSION_NAME}\"
   kill -9 <pid>
+Restart the runtime only if that does not free it, and only once nothing else needs it: it stops EVERY container, other profiles' too:
   container system stop && container system start" >&2
       return 1
     fi
