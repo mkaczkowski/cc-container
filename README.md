@@ -532,6 +532,14 @@ thing it cannot restore is the Claude.ai login: `cc-profile train attach`, then
 `/login`. Also, `container image prune -a` removes the agent image when no
 container runs; rebuild it with `cc-profile train build`.
 
+A Mac restart or a crash stops the VM without flushing its file system, and
+ext4 can keep a file written just before as an empty one. If that was a
+freshly fetched trainyard engine (`/root/.local/state/trainyard/engines/<version>`
+in the volume), `trainyard` exits 0 without a word and `attach` seems to do
+nothing. The profile's `CC_STARTUP_COMMAND` removes any engine whose
+`package.json` or entry point is empty at every `up` and says so; the launcher
+fetches it again on first use (it needs the network then).
+
 To run the train's task sessions on pi with OpenRouter models
 (`trainyard run --harness pi --pi-billing openrouter`), put
 `OPENROUTER_API_KEY=...` in `mcp.env` and name it in the profile's
@@ -811,6 +819,7 @@ Apple-silicon user hits. For anything else, the wrapper gives you three seams in
 | `CC_PRE_RUN_HOOK` | A function run on the host before a container starts |
 | `CC_POST_DOWN_HOOK` | A function run by `cc-down` once no containers remain |
 | `CC_REQUIRED_COMMANDS` | Commands the shared session must have once `cc-up` has started it (not checked for one-off runs), for tools kept in the home volume; `cc-up` fails naming any that are missing |
+| `CC_STARTUP_COMMAND` | A shell command `cc-up` runs inside the session at every start, before the `CC_REQUIRED_COMMANDS` check, to repair state kept in the home volume; a non-zero exit fails `cc-up` |
 | `CC_SETUP_COMMAND` | A shell command `cc-up` runs inside the session when a required command is missing, to install it again (then checks once more) |
 
 Guest-side helpers go in a directory you mount at `/opt/cc-local`, which is on

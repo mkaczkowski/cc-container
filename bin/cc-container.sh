@@ -103,6 +103,13 @@ CC_ATTACH_COMMAND=(${CC_ATTACH_COMMAND+"${CC_ATTACH_COMMAND[@]}"})
 CC_REQUIRED_COMMANDS=(${CC_REQUIRED_COMMANDS+"${CC_REQUIRED_COMMANDS[@]}"})
 CC_SETUP_COMMAND="${CC_SETUP_COMMAND:-}"
 
+# A shell command run inside the shared session at every cc-up, after it is
+# running and before the CC_REQUIRED_COMMANDS check, to repair state kept in
+# the home volume. A VM that stops uncleanly (a Mac restart, a crash) can leave
+# files written just before it as empty ones, and nothing in the guest notices.
+# It must exit non-zero when it cannot repair, which fails cc-up.
+CC_STARTUP_COMMAND="${CC_STARTUP_COMMAND:-}"
+
 # Free space on the Mac's data volume, in GB. The VM disks, the home volumes,
 # the images and every mounted checkout all live there, and when it fills, a
 # running guest's root file system hits I/O errors and turns read-only until
@@ -855,6 +862,15 @@ _cc_ensure_session_commands() {
   fi
 }
 
+# Runs CC_STARTUP_COMMAND in the running session; fails cc-up if it fails.
+_cc_run_startup_command() {
+  [ -n "${CC_STARTUP_COMMAND}" ] || return 0
+  container exec "${CC_SESSION_NAME}" /bin/bash -c "${CC_STARTUP_COMMAND}" || {
+    echo "cc-container: CC_STARTUP_COMMAND failed in ${CC_SESSION_NAME}: ${CC_STARTUP_COMMAND}" >&2
+    return 1
+  }
+}
+
 cc-up() {
   _cc_config_current || return 1
   cc-runtime-up || return 1
@@ -871,6 +887,7 @@ cc-up() {
     size="$(_cc_session_size_change)" || return 1
   fi
   if [ "${state}" = "running" ]; then
+    _cc_run_startup_command || return 1
     _cc_ensure_session_commands || return 1
     cc-reap || return 1
     echo "${CC_SESSION_NAME} already running. Attach with: $(_cc_cmd attach cc-attach)"
@@ -913,6 +930,7 @@ cc-up() {
       "${CC_CONTAINER_IMAGE}" -c '/opt/cc-tools/cc-workspace-link && exec sleep infinity' || return 1
   fi
   _cc_sim_release_probe
+  _cc_run_startup_command || return 1
   _cc_ensure_session_commands || return 1
   echo "${CC_SESSION_NAME} up, mounting ${PWD}. Attach with: $(_cc_cmd attach cc-attach)"
 }

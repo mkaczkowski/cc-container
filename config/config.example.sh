@@ -61,6 +61,11 @@
 # one-off cc-container runs. See config/profile.train.example.sh.
 # CC_REQUIRED_COMMANDS=(mytool)
 # CC_SETUP_COMMAND='npm i -g --prefix /root/.local mytool'
+# A shell command cc-up runs in the session at every start, before that check,
+# to repair state in the home volume (an unclean VM stop can leave recently
+# written files empty). It must exit non-zero when it cannot repair; that fails
+# cc-up. See config/profile.train.example.sh.
+# CC_STARTUP_COMMAND='test -s /root/.local/share/mytool/data.json'
 # Named volume mounted as the container's home (/root). Only one running
 # container can hold it; a profile running beside the session needs its own.
 # CC_HOME_VOLUME=cc-home
