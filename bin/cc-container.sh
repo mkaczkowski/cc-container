@@ -348,8 +348,10 @@ _cc_spin() {
     wait "${pid}"
   )
   rc=$?
-  cat "${out}"
-  cat "${err}" >&2
+  # `command` skips an alias: with cat aliased to bat (zsh expands aliases when
+  # the function is defined), the output came back wrapped in "File:" frames.
+  command cat "${out}"
+  command cat "${err}" >&2
   rm -f "${out}" "${err}"
   return "${rc}"
 }

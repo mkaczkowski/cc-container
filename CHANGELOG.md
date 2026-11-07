@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- **Spinner output is no longer framed when `cat` is aliased.** With `cat`
+  aliased to `bat`, the output of a command run under the spinner (the
+  `ccdown` stop error, for one) came back inside `File: /tmp/cc-spin.*` frames
+  and empty-file banners. The wrapper now calls `command cat`.
 - **The train profile repairs a trainyard engine corrupted by an unclean
   stop.** After a Mac restart or a crash, a freshly fetched engine in the home
   volume could be left with empty files, and `attach` then did nothing without
