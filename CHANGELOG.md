@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- **Links are clickable in container sessions again.** Claude Code decides
+  whether to emit clickable links from `TERM_PROGRAM` (Ghostty, iTerm2,
+  WezTerm, VS Code, ...), `LC_TERMINAL` or a kitty `TERM`, and the wrapper
+  forwarded only `TERM`, which says nothing for `xterm-ghostty`. `ccrun`,
+  `ccx`, `pix`, `pirun`, `ccxs` and `cc-exec` now also forward
+  `TERM_PROGRAM`, `TERM_PROGRAM_VERSION`, `LC_TERMINAL` and
+  `LC_TERMINAL_VERSION` when the Mac sets them.
+
 - **Spinner output is no longer framed when `cat` is aliased.** With `cat`
   aliased to `bat`, the output of a command run under the spinner (the
   `ccdown` stop error, for one) came back inside `File: /tmp/cc-spin.*` frames
