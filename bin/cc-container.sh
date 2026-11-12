@@ -685,6 +685,20 @@ _cc_terminfo_collect() {
   CC_TERMINFO_ARGS=(--env "CC_TERMINFO_SRC=${src}")
 }
 
+# The terminal identity the session needs. Claude Code only emits clickable
+# links (OSC 8) for a terminal it recognizes by TERM_PROGRAM (ghostty, iTerm.app,
+# WezTerm, vscode, ...), LC_TERMINAL or a kitty TERM; TERM alone says nothing for
+# xterm-ghostty. A variable the Mac did not set is not passed, so the guest never
+# sees an empty one.
+CC_TERM_ARGS=()
+_cc_term_collect() {
+  CC_TERM_ARGS=(--env TERM)
+  [ -z "${TERM_PROGRAM:-}" ] || CC_TERM_ARGS+=(--env TERM_PROGRAM)
+  [ -z "${TERM_PROGRAM_VERSION:-}" ] || CC_TERM_ARGS+=(--env TERM_PROGRAM_VERSION)
+  [ -z "${LC_TERMINAL:-}" ] || CC_TERM_ARGS+=(--env LC_TERMINAL)
+  [ -z "${LC_TERMINAL_VERSION:-}" ] || CC_TERM_ARGS+=(--env LC_TERMINAL_VERSION)
+}
+
 _cc_run() {
   local entrypoint_args=() default_flags=()
   case "$1" in
@@ -713,6 +727,7 @@ _cc_run() {
   _cc_call_hook "${CC_PRE_RUN_HOOK}" CC_PRE_RUN_HOOK || return 1
   _cc_mcp_collect || return 1
   _cc_policy_collect || return 1
+  _cc_term_collect
   # -it needs a real TTY; fall back for piped/scripted use (e.g. claude -p).
   local tty_args=()
   if [ -t 0 ] && [ -t 1 ]; then tty_args=(-it); fi
@@ -728,7 +743,7 @@ _cc_run() {
     ${CC_POLICY_ARGS+"${CC_POLICY_ARGS[@]}"} \
     --workdir "${PWD}" \
     --dns 8.8.8.8 \
-    --env TERM \
+    "${CC_TERM_ARGS[@]}" \
     --env "CC_HOST_MOUNT=${PWD}" \
     "${entrypoint_args[@]}" \
     "${CC_CONTAINER_IMAGE}" ${default_flags+"${default_flags[@]}"} "$@"
@@ -1006,7 +1021,8 @@ cc-attach() {
   _cc_attach_guard || return 1
   container exec "${CC_SESSION_NAME}" /opt/cc-tools/cc-mcp-sync || return 1
   cc-reap || return 1
-  _cc_awake container exec "${tty_args[@]}" --env TERM \
+  _cc_term_collect
+  _cc_awake container exec "${tty_args[@]}" "${CC_TERM_ARGS[@]}" \
     --env "CC_ATTACH_ID=$(_cc_attach_id)" \
     --workdir "${workdir}" \
     "${CC_SESSION_NAME}" "${CC_ATTACH_COMMAND[@]}" ${default_flags+"${default_flags[@]}"} "$@"
@@ -1033,7 +1049,8 @@ pi-attach() {
     shift 2
   fi
   cc-reap || return 1
-  _cc_awake container exec "${tty_args[@]}" --env TERM \
+  _cc_term_collect
+  _cc_awake container exec "${tty_args[@]}" "${CC_TERM_ARGS[@]}" \
     --env "CC_ATTACH_ID=$(_cc_attach_id)" \
     --workdir "${workdir}" \
     "${CC_SESSION_NAME}" pi "$@"
@@ -1051,7 +1068,8 @@ cc-attach-shell() {
   _cc_terminfo_collect
   container exec --env TERM ${CC_TERMINFO_ARGS+"${CC_TERMINFO_ARGS[@]}"} \
     "${CC_SESSION_NAME}" /opt/cc-tools/cc-terminfo-sync || return 1
-  _cc_awake container exec "${tty_args[@]}" --env TERM --workdir "${workdir}" \
+  _cc_term_collect
+  _cc_awake container exec "${tty_args[@]}" "${CC_TERM_ARGS[@]}" --workdir "${workdir}" \
     "${CC_SESSION_NAME}" /bin/bash "$@"
 }
 
@@ -1072,7 +1090,8 @@ cc-exec() {
   local tty_args=()
   if [ -t 0 ] && [ -t 1 ]; then tty_args=(-it); fi
   local workdir; workdir="$(_cc_attach_workdir)" || return 1
-  _cc_awake container exec ${tty_args+"${tty_args[@]}"} --env TERM --workdir "${workdir}" \
+  _cc_term_collect
+  _cc_awake container exec ${tty_args+"${tty_args[@]}"} "${CC_TERM_ARGS[@]}" --workdir "${workdir}" \
     "${CC_SESSION_NAME}" "$@"
 }
 
