@@ -755,6 +755,11 @@ address, and `guest/mac-sim` forwards to it. The host does the work; results com
 back through the bind-mounted workspace, so a screenshot written under the
 project is readable in the container.
 
+The same bridge opens links: with it on, `$BROWSER` and `xdg-open` in the guest
+open an https URL in the Mac's browser (`mac-sim browse`), so clicking a PR link
+in a session, or `gh ... --web`, works for the prefixes in `browse.allow`
+([details](docs/MAC-SIM.md#opening-a-link-in-the-macs-browser)).
+
 ```bash
 cp config/mac-sim.example.json ~/.config/cc-container/mac-sim.json
 $EDITOR ~/.config/cc-container/mac-sim.json   # declare a project root

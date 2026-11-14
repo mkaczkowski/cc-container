@@ -644,6 +644,10 @@ _cc_sim_auto_up() {
   CC_SIM_RUN_ARGS=(
     --env "MAC_SIM_SHIM=http://$(_cc_sim_host):$(_cc_sim_port)"
     --env "MAC_SIM_TOKEN=$(cat "${CC_SIM_TOKEN_FILE}")"
+    # The guest has no browser: clicked links open on the Mac through
+    # `mac-sim browse`. Set only with the bridge, because a set $BROWSER makes
+    # Claude Code stop treating the guest as headless.
+    --env "BROWSER=/opt/cc-tools/xdg-open"
   )
 }
 
