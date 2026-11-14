@@ -1,0 +1,12 @@
+#!/bin/sh
+# xdg-open for the guest, which has no browser: opens the URL in the Mac's
+# browser through `mac-sim browse`, so clicking a link in a session works.
+# Only the https prefixes the host config allows (browse.allow) open; anything
+# else fails with the shim's own message, naming the URL and the allowed prefixes.
+# pi calls this by name; Claude Code reads $BROWSER, which cc-container.sh sets
+# to this script together with the mac-sim bridge env (see _cc_sim_auto_up).
+[ "$#" -eq 1 ] || { echo "xdg-open: expected exactly one URL, got $#${*:+: $*}" >&2; exit 2; }
+case "$1" in
+  -*) echo "xdg-open: expected a URL, got the option $1" >&2; exit 2 ;;
+esac
+exec /opt/cc-tools/mac-sim browse "$1"

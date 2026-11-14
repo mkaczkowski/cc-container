@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- **Clicking a link in a container session opens it in the Mac's browser.**
+  The guest has no browser, so a click ended in "Couldn't open your browser".
+  `guest/xdg-open` now forwards the URL to `mac-sim browse`, and the wrapper
+  sets `BROWSER` to it along with the other mac-sim bridge env. Only the https
+  prefixes in `browse.allow` open (GitHub and Notion by default). Any other
+  URL, and loopback URLs such as a login helper's `http://127.0.0.1:<port>`,
+  still fail: Claude Code shows its usual message and pi shows nothing, so run
+  `xdg-open <url>` in `ccxs` to see the reason. Needs mac-sim configured
+  (`mac-sim.json`) and the session started inside a declared project root; a
+  running shared session picks it up after `ccdown && ccup`.
+
 - **Links are clickable in container sessions again.** Claude Code decides
   whether to emit clickable links from `TERM_PROGRAM` (Ghostty, iTerm2,
   WezTerm, VS Code, ...), `LC_TERMINAL` or a kitty `TERM`, and the wrapper
