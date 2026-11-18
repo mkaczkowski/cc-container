@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- **The host proxy outlives whatever started it.** `cc-proxy-up` ran tinyproxy
+  as a child of its caller, so when that caller went away the proxy died while
+  the guests kept running. A launchd job that ran `cc-up` (a dock) took the
+  proxy with it on restart. Every guest then lost its internet with no sign on
+  the host. The proxy is now the launchd agent `com.cc-container.proxy`, which
+  launchd restarts if it crashes. `cc-up` installs it (stopping a proxy an
+  older release left running) and the last `cc-down` removes it. `cc-status`
+  and `cc-doctor` now say when the proxy is required but down.
+
 - **Clicking a link in a container session opens it in the Mac's browser.**
   The guest has no browser, so a click ended in "Couldn't open your browser".
   `guest/xdg-open` now forwards the URL to `mac-sim browse`, and the wrapper

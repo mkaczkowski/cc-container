@@ -53,6 +53,14 @@ cc-doctor          # records "proxy"; CC_PROXY=auto then uses it
 machines that need it, and the launch path stays fast everywhere else. Force it
 either way with `CC_PROXY=on` / `CC_PROXY=off`.
 
+The proxy runs as the launchd agent `com.cc-container.proxy`, so it outlives
+the shell or launchd job that ran `cc-up` (a dock that restarts used to take it
+down while its guests kept running) and launchd restarts it if it crashes.
+`cc-up` installs it and the last `cc-down` removes it; its plist and
+`tinyproxy.log` are in `~/.local/state/cc-container/`. Its plist is not in
+`~/Library/LaunchAgents`, so logging in does not start it. A tinyproxy you
+already run on the port is used as is.
+
 ## Consequences of running behind the proxy
 
 Anything that hard-codes a direct connection and ignores `http_proxy` /

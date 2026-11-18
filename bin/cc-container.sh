@@ -212,7 +212,14 @@ CC_PROXY_URL="http://${CC_PROXY_HOST}:${CC_PROXY_PORT}"
 CC_MCP_DIR="${CC_MCP_DIR:-${CC_CONFIG_DIR}/mcp}"
 CC_PI_DIR="${CC_PI_DIR:-${CC_CONFIG_DIR}/pi}"
 CC_MCP_ENV_FILE="${CC_MCP_ENV_FILE:-${CC_CONFIG_DIR}/mcp.env}"
-CC_PROXY_PID_FILE="${CC_STATE_DIR}/tinyproxy.pid"
+# The proxy runs as its own launchd agent so it outlives the shell (or the
+# launchd job, such as a dock) that ran cc-up. The plist stays in the state dir,
+# not ~/Library/LaunchAgents, so login never starts it: cc-up does.
+CC_PROXY_LABEL="com.cc-container.proxy"
+CC_PROXY_PLIST="${CC_STATE_DIR}/${CC_PROXY_LABEL}.plist"
+# Written by releases that ran tinyproxy as a child of the caller; read once to
+# stop such a proxy so the agent can take the port.
+_CC_PROXY_LEGACY_PID_FILE="${CC_STATE_DIR}/tinyproxy.pid"
 CC_EGRESS_STATE="${CC_STATE_DIR}/egress"
 # Per profile, so building one image never changes the agent versions another
 # image is pinned to.
@@ -430,16 +437,10 @@ _cc_proxy_wanted() {
   esac
 }
 
-cc-proxy-up() {
-  _cc_listening "${CC_PROXY_PORT}" && return 0
-  if ! command -v tinyproxy >/dev/null 2>&1; then
-    echo "cc-container: tinyproxy is not installed but CC_PROXY resolves to on." >&2
-    echo "  brew install tinyproxy   (or set CC_PROXY=off if your guests have direct egress)" >&2
-    return 1
-  fi
-  tinyproxy -d -c "${CC_CONFIG_DIR}/tinyproxy.conf" \
-    >"${CC_STATE_DIR}/tinyproxy.log" 2>&1 &
-  echo "$!" > "${CC_PROXY_PID_FILE}"
+_cc_proxy_domain() { echo "gui/$(id -u)"; }
+_cc_proxy_loaded() { launchctl print "$(_cc_proxy_domain)/${CC_PROXY_LABEL}" >/dev/null 2>&1; }
+
+_cc_proxy_wait_listening() {
   # Poll rather than sleeping a flat interval: it is usually ready well inside
   # the first tick, and a fixed sleep would tax every container start.
   local waited=0
@@ -448,21 +449,105 @@ cc-proxy-up() {
     sleep 0.2
     waited=$((waited + 1))
   done
-  echo "cc-container: proxy failed to start on port ${CC_PROXY_PORT}; see ${CC_STATE_DIR}/tinyproxy.log" >&2
+  echo "cc-container: proxy failed to start on port ${CC_PROXY_PORT}; see ${CC_STATE_DIR}/tinyproxy.log and: launchctl print $(_cc_proxy_domain)/${CC_PROXY_LABEL}" >&2
   return 1
 }
 
-# Kill only the tinyproxy this tool started, never someone else's.
-cc-proxy-down() {
+# Stop a tinyproxy an older release started as a child of its caller. It holds
+# the port, so without this the agent would never be installed and the proxy
+# would still die with that caller.
+_cc_proxy_stop_legacy() {
   local pid
-  pid="$(cat "${CC_PROXY_PID_FILE}" 2>/dev/null)"
-  if [ -n "${pid}" ] && kill -0 "${pid}" 2>/dev/null; then
-    kill "${pid}" 2>/dev/null
-    rm -f "${CC_PROXY_PID_FILE}"
-    return 0
+  pid="$(cat "${_CC_PROXY_LEGACY_PID_FILE}" 2>/dev/null)"
+  rm -f "${_CC_PROXY_LEGACY_PID_FILE}"
+  [ -n "${pid}" ] && kill -0 "${pid}" 2>/dev/null || return 0
+  kill "${pid}" || { echo "cc-container: could not stop the old proxy (pid ${pid}); kill it and re-run cc-proxy-up" >&2; return 1; }
+  local waited=0
+  while _cc_listening "${CC_PROXY_PORT}" && [ "${waited}" -lt 20 ]; do
+    sleep 0.2
+    waited=$((waited + 1))
+  done
+  if _cc_listening "${CC_PROXY_PORT}"; then
+    echo "cc-container: port ${CC_PROXY_PORT} is still taken after stopping the old proxy (pid ${pid}); see: lsof -nP -iTCP:${CC_PROXY_PORT} -sTCP:LISTEN" >&2
+    return 1
   fi
-  rm -f "${CC_PROXY_PID_FILE}"
-  return 1
+}
+
+_cc_proxy_write_plist() {
+  local bin="$1"
+  mkdir -p "${CC_STATE_DIR}" || return 1
+  cat > "${CC_PROXY_PLIST}" <<PLIST || return 1
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>${CC_PROXY_LABEL}</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>${bin}</string>
+    <string>-d</string>
+    <string>-c</string>
+    <string>${CC_CONFIG_DIR}/tinyproxy.conf</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>${CC_STATE_DIR}/tinyproxy.log</string>
+  <key>StandardErrorPath</key><string>${CC_STATE_DIR}/tinyproxy.log</string>
+</dict>
+</plist>
+PLIST
+}
+
+cc-proxy-up() {
+  _cc_proxy_stop_legacy || return 1
+  if _cc_proxy_loaded; then
+    _cc_listening "${CC_PROXY_PORT}" && return 0
+    launchctl kickstart "$(_cc_proxy_domain)/${CC_PROXY_LABEL}" || {
+      echo "cc-container: launchctl kickstart $(_cc_proxy_domain)/${CC_PROXY_LABEL} failed" >&2
+      return 1
+    }
+    _cc_proxy_wait_listening
+    return
+  fi
+  # A proxy you run yourself on the port is used as is, never replaced.
+  _cc_listening "${CC_PROXY_PORT}" && return 0
+  local bin
+  if ! bin="$(command -v tinyproxy)"; then
+    echo "cc-container: tinyproxy is not installed but CC_PROXY resolves to on." >&2
+    echo "  brew install tinyproxy   (or set CC_PROXY=off if your guests have direct egress)" >&2
+    return 1
+  fi
+  if ! _cc_proxy_write_plist "${bin}"; then
+    echo "cc-container: could not write ${CC_PROXY_PLIST}" >&2
+    return 1
+  fi
+  local code=0
+  launchctl bootstrap "$(_cc_proxy_domain)" "${CC_PROXY_PLIST}" || code=$?
+  if [ "${code}" -ne 0 ]; then
+    echo "cc-container: launchctl bootstrap $(_cc_proxy_domain) ${CC_PROXY_PLIST} exited ${code}; the proxy needs a logged-in GUI session (not plain ssh)" >&2
+    return 1
+  fi
+  _cc_proxy_wait_listening
+}
+
+# Stop only the agent this tool installed, never someone else's tinyproxy.
+cc-proxy-down() {
+  _cc_proxy_loaded || return 1
+  launchctl bootout "$(_cc_proxy_domain)/${CC_PROXY_LABEL}" || {
+    echo "cc-container: launchctl bootout $(_cc_proxy_domain)/${CC_PROXY_LABEL} failed" >&2
+    return 1
+  }
+  # Bootout returns before the label is gone; a cc-up right after would fail
+  # to bootstrap it again.
+  local waited=0
+  while _cc_proxy_loaded && [ "${waited}" -lt 25 ]; do
+    sleep 0.2
+    waited=$((waited + 1))
+  done
+  if _cc_proxy_loaded; then
+    echo "cc-container: ${CC_PROXY_LABEL} is still loaded 5 s after bootout; see: launchctl print $(_cc_proxy_domain)/${CC_PROXY_LABEL}" >&2
+    return 1
+  fi
 }
 
 # Proxy env vars, emitted only when the proxy is actually in play.
@@ -1291,7 +1376,7 @@ cc-down() {
     echo "host helpers: left running (other containers still up)"
     return 0
   fi
-  _cc_listening "${CC_PROXY_PORT}" && cc-proxy-down >/dev/null 2>&1 && echo "stopped:  proxy"
+  _cc_proxy_loaded && cc-proxy-down && echo "stopped:  proxy"
   # A builder cc-container-build could not stop (an interrupted build, or a
   # plain `container build`). A build still running in another terminal would
   # be cut off, as the proxy already would cut it off.
@@ -1309,7 +1394,11 @@ cc-status() {
     off) echo "proxy:    disabled (CC_PROXY=off)" ;;
     *)
       if _cc_listening "${CC_PROXY_PORT}"; then
-        echo "proxy:    listening on ${CC_PROXY_URL} (mode=${CC_PROXY})"
+        local owner="not managed by cc-container"
+        _cc_proxy_loaded && owner="launchd agent ${CC_PROXY_LABEL}"
+        echo "proxy:    listening on ${CC_PROXY_URL} (mode=${CC_PROXY}, ${owner})"
+      elif _cc_proxy_wanted; then
+        echo "proxy:    DOWN but required (mode=${CC_PROXY}): guests have no internet; run cc-proxy-up"
       else
         echo "proxy:    down (mode=${CC_PROXY}; direct egress assumed, run cc-doctor to verify)"
       fi ;;
@@ -1440,6 +1529,13 @@ cc-doctor() {
     fi
   fi
   _p "egress mode" "$(cat "${CC_EGRESS_STATE}" 2>/dev/null || echo unknown) (CC_PROXY=${CC_PROXY})"
+  if _cc_proxy_wanted; then
+    if _cc_listening "${CC_PROXY_PORT}"; then
+      _p "proxy" "listening on ${CC_PROXY_PORT}"
+    else
+      _p "proxy" "FAIL not listening on ${CC_PROXY_PORT} - run cc-proxy-up"; ok=1
+    fi
+  fi
   unset -f _p
   return "${ok}"
 }
