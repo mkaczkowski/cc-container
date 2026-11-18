@@ -578,7 +578,7 @@ Outside it:
 - **Your shell rc** gets one `source` line from `install.sh`
   (`./install.sh --uninstall` removes it).
 - **`~/.local/state/cc-container/`** is written by the wrapper itself: the
-  versions `cc-container-build` reuses, the proxy's pid and log, the mac-sim
+  versions `cc-container-build` reuses, the proxy's launchd plist and log, the mac-sim
   token and log, and the private `TMPDIR`s of mac-sim commands that declare
   `private_tmp`. Each profile records its image versions in its own
   `image-versions.<name>`. Nothing to set up.
