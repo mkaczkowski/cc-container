@@ -27,9 +27,8 @@ CC_SESSION_MEMORY=8g
 # --- what it must not inherit ------------------------------------------------
 # Reset every mount config.sh added: only the project directory remains.
 CC_EXTRA_VOLUME_ARGS=()
-# No MCP servers, no mcp.env secrets, no pi config, no mac-sim token.
+# No MCP servers, no mcp.env secrets, no mac-sim token.
 CC_MCP=0
-CC_PI_SYNC=0
 CC_SIM_AUTO=0
 # Host hooks belong to the shared session.
 CC_PRE_RUN_HOOK=

@@ -11,7 +11,7 @@ bound to a single Gymlog checkout.
 `cc-train` is a profile (`~/.config/cc-container/profiles/train.sh`; the
 current version is `config/profile.train.example.sh`, based on
 `config/profile.runner.example.sh`) with its own home volume (`train-home`),
-16g / 8 CPUs, subscription-only, no extra mounts, no MCP or pi config, and the
+16g / 8 CPUs, subscription-only, no extra mounts, no MCP config, and the
 mac-sim bridge kept. Compared with the shared `cc-session` it narrows the
 boundary to the one directory it was started from.
 
@@ -31,7 +31,7 @@ The container:
 
 The tooling:
 
-- The driver runs in the guest and spawns `claude` / `pi` itself
+- The driver runs in the guest and spawns `claude` itself
   (`train.mjs`, `TRAIN_CLAUDE_BIN`).
 - State lives in `<repo>/.mac-sim/train`, the warm pool in
   `<repo>/.claude/worktrees/train-pool-<n>`, the Android checkout in

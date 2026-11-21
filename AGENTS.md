@@ -1,9 +1,5 @@
 # Agent instructions
 
-Both Claude Code and pi read this file. Keep it agent-neutral: plain Markdown,
-no `@imports` (pi does not resolve them), and name the agent whenever a rule
-applies to only one of them.
-
 **Do not add a `CLAUDE.md`** anywhere in the repo (root, `.claude/` or a
 subdirectory). Claude Code loads `AGENTS.md` only for a project with no
 `CLAUDE.md` of its own, so adding one silently hides this file from it. CI
@@ -19,31 +15,29 @@ anything, and `SECURITY.md` before anything that touches the VM boundary.
 - `guest/` is mounted read-only at `/opt/cc-tools` and is on the guest `PATH`:
   an edit there applies to the next session without a rebuild. A change to
   `image/Dockerfile` needs `cc-container-build`.
-- Session startup happens in four places that must stay in step:
-  `guest/cc-entry` and `guest/pi-entry` (one-off sessions, as the container
-  entrypoint) and `cc-attach` and `pi-attach` in `bin/cc-container.sh` (the
-  shared session, through `container exec`). A new startup step usually belongs
-  in more than one of them.
+- Session startup happens in two places that must stay in step:
+  `guest/cc-entry` (one-off sessions, as the container entrypoint) and
+  `cc-attach` in `bin/cc-container.sh` (the shared session, through
+  `container exec`). A new startup step usually belongs in both. Codex has the
+  same pair, `guest/codex-entry` and `codex-attach`, but none of the Claude Code
+  steps (MCP sync, subscription guard) apply to it.
 
-## Claude Code and pi
+## Claude Code
 
 - Behaviour that must hold whatever the model does (auth, policy, config sync)
-  goes in a guest script that runs before the agent starts. Never rely on a
-  skill, prompt template or extension alone: the model may not load a skill,
-  and the user can remove an extension. `guest/cc-subscription-guard` is the
-  pattern.
-- A capability both agents need lives in one agent-neutral place (a command on
-  the guest `PATH`, the shared `mcp-servers.json`), with at most thin wiring for
-  each agent. `mac-sim` and `cc-mcp-sync` are the pattern. Use the `pi-` prefix
-  only for scripts that are pi-only.
-- Do not reimplement one agent's features in the other (worktrees, subagents);
-  see Scope in `CONTRIBUTING.md`. Users add pi extensions, skills, prompts and
-  packages through `~/.config/cc-container/pi/`, not through this repo.
+  goes in a guest script that runs before Claude Code starts. Never rely on a
+  skill, prompt template or plugin alone: the model may not load a skill, and
+  the user can remove a plugin. `guest/cc-subscription-guard` is the pattern.
+- A capability lives in one place (a command on the guest `PATH`, the shared
+  `mcp-servers.json`), with at most thin wiring for Claude Code. `mac-sim` and
+  `cc-mcp-sync` are the pattern.
+- Do not reimplement Claude Code's own features (worktrees, subagents); see
+  Scope in `CONTRIBUTING.md`.
 
 ## Sync scripts
 
-`cc-mcp-sync` and `pi-config-sync` merge declarative config from the Mac into
-agent state that the user also edits by hand. Keep their contract:
+`cc-mcp-sync` merges declarative config from the Mac into Claude Code state
+that the user also edits by hand. Keep its contract:
 
 - Change only what the sidecar records as owned by the script; keep everything
   else.

@@ -27,9 +27,8 @@ CC_SUBSCRIPTION_ONLY=1
 # --- what it must not inherit ------------------------------------------------
 # Only the project directory: no notes, vaults or tool directories of yours.
 CC_EXTRA_VOLUME_ARGS=()
-# No MCP servers or mcp.env secrets, no pi config.
+# No MCP servers or mcp.env secrets.
 CC_MCP=0
-CC_PI_SYNC=0
 # Host hooks belong to the shared session.
 CC_PRE_RUN_HOOK=
 CC_POST_DOWN_HOOK=

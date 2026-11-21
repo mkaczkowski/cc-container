@@ -2,8 +2,8 @@
 # Ends attached sessions whose terminal on the Mac is gone.
 #
 # Closing the Mac side of `container exec -it` does not hang up the guest pty,
-# so a ccx or pix whose terminal was closed kept running (and holding its
-# memory) until ccdown. cc-attach and pi-attach tag their session with
+# so a ccx whose terminal was closed kept running (and holding its
+# memory) until ccdown. cc-attach tags its session with
 # CC_ATTACH_ID; the Mac passes the IDs whose `container exec` client is still
 # alive. A session leader started by `container exec` (parent pid 0) whose tag
 # is not among them gets SIGHUP, then SIGKILL after a grace period. Untagged

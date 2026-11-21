@@ -1,22 +1,17 @@
 #!/usr/bin/env python3
-"""Refuse to start an agent unless it can only bill a Claude subscription.
+"""Refuse to start Claude Code unless it can only bill a Claude subscription.
 
 Enabled by CC_SUBSCRIPTION_ONLY=1 on the host (see bin/cc-container.sh), which
 also mounts policy/subscription-only/ read-only at /etc/claude-code. Claude Code
 enforces that managed policy itself: forceLoginMethod "claudeai" rejects API
 keys and Console logins, allowedProviders ["anthropic"] rejects Bedrock, Vertex
 and the rest, whether set by env or by a settings.json "env" block. Because the
-mount is read-only, root in the guest cannot edit it. That also covers
-pi-claude-bridge, whose model calls run through this same Claude Code.
+mount is read-only, root in the guest cannot edit it.
 
-pi's own providers are outside that policy, so this script checks what pi could
-bill instead: exported Anthropic, AWS and Claude Code credentials, ambient AWS
-credentials, and anything but OAuth in pi's auth.json. The env keys of pi's
-other providers (OPENROUTER_API_KEY, OPENAI_API_KEY, ...) are not enumerated,
-so a profile can pass one on purpose, e.g. for trainyard's openrouter billing,
-which holds every pi session to that one provider itself. It runs at every
-session start; it cannot stop an agent that exports a key mid-session, which the
-policy file still does for Claude Code.
+This script checks what the policy cannot: that the policy is mounted at all,
+and that no Anthropic, AWS or Claude Code credentials are exported or ambient.
+It runs at every session start; it cannot stop an agent that exports a key
+mid-session, which the policy file still does.
 """
 
 import json
@@ -24,15 +19,10 @@ import os
 import sys
 
 POLICY = "/etc/claude-code/managed-settings.json"
-PI_AGENT_DIR = os.environ.get("PI_CODING_AGENT_DIR") or os.path.expanduser("~/.pi/agent")
-PI_AUTH = os.path.join(PI_AGENT_DIR, "auth.json")
 AWS_DIR = os.path.expanduser("~/.aws")
-# Each would route pi (or the Claude Code child of pi-claude-bridge) off the
-# subscription: an Anthropic API key or gateway, or a cloud provider's account.
+# Each would route Claude Code off the subscription: an Anthropic API key or
+# gateway, or a cloud provider's account.
 ENV_PREFIXES = ("ANTHROPIC_", "AWS_", "CLAUDE_CODE_USE_", "GOOGLE_APPLICATION_CREDENTIALS")
-# Cloud providers authenticate from ambient credentials, not from an auth.json
-# type, so an entry for one is refused whatever its type.
-CLOUD_PROVIDERS = {"amazon-bedrock", "google-vertex"}
 
 
 def problems():
@@ -57,26 +47,7 @@ def problems():
         )
 
     if os.path.exists(AWS_DIR):
-        found.append(f"{AWS_DIR} exists, so pi could use Amazon Bedrock. Delete it.")
-
-    try:
-        with open(PI_AUTH) as fh:
-            auth = json.load(fh)
-    except FileNotFoundError:
-        auth = {}
-    except (OSError, json.JSONDecodeError) as exc:
-        found.append(f"cannot read {PI_AUTH}: {exc}")
-        auth = {}
-    if not isinstance(auth, dict):
-        found.append(f"{PI_AUTH}: expected an object, got {type(auth).__name__}")
-        auth = {}
-    for provider, cred in sorted(auth.items()):
-        kind = cred.get("type") if isinstance(cred, dict) else None
-        if provider in CLOUD_PROVIDERS or kind != "oauth":
-            found.append(
-                f"{PI_AUTH} holds a credential of type '{kind}' for '{provider}'. "
-                f"Remove it with /logout {provider} in pi, or delete that entry."
-            )
+        found.append(f"{AWS_DIR} exists, so Claude Code could use Amazon Bedrock. Delete it.")
     return found
 
 

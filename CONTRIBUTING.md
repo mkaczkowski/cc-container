@@ -7,7 +7,7 @@
   configurable belongs in `config/*.example.*` and is read from
   `~/.config/cc-container/` at runtime. CI fails the build if a `/Users/<name>/`
   path appears in a tracked file.
-- **Keep it generic.** This tool runs coding agents (Claude Code, pi) in a VM;
+- **Keep it generic.** This tool runs Claude Code in a VM;
   it does not bundle support for any particular language, framework, or host
   toolchain. Anything project-specific belongs behind the `CC_EXTRA_RUN_ARGS` /
   `CC_PRE_RUN_HOOK` seams, in someone's own config.
@@ -18,10 +18,10 @@
 
 ```bash
 bash -n bin/cc-container.sh install.sh guest/statusline.sh
-sh -n guest/cc-entry guest/pi-entry guest/cc-workspace-link guest/shell-entry guest/cc-terminfo-sync guest/cc-reap guest/xdg-open host/bin/mac-sim
+sh -n guest/cc-entry guest/codex-entry guest/cc-workspace-link guest/shell-entry guest/cc-terminfo-sync guest/cc-reap guest/xdg-open host/bin/mac-sim
 zsh -n bin/cc-container.sh                 # it is sourced from both shells
 shellcheck -s bash bin/cc-container.sh install.sh guest/statusline.sh
-python3 -m py_compile guest/cc-mcp-sync guest/cc-subscription-guard guest/pi-config-sync guest/mac-sim host/mac-sim-shim.py
+python3 -m py_compile guest/cc-mcp-sync guest/cc-subscription-guard guest/mac-sim host/mac-sim-shim.py
 python3 -c 'import json,glob; [json.load(open(f)) for f in glob.glob("**/*.json", recursive=True)]'
 ```
 
@@ -38,11 +38,10 @@ silicon.** Say in your PR what you actually ran.
 cc-container-build && cc-doctor
 ccrun -p 'print the working directory and list files'   # one-off session
 ccup && ccx && ccdown                                   # shared session
-pirun --version                                         # pi in the image
 ```
 
 ## Scope
 
-This tool deliberately does one thing: run coding agents (Claude Code, pi) in an
+This tool deliberately does one thing: run Claude Code in an
 apple/container VM. Features that belong in the agents themselves, in a
 project's own scripts, or behind the extension hooks are out of scope.

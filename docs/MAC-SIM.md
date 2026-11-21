@@ -120,11 +120,11 @@ Narrow a prefix to your own account (`https://github.com/<you>/`) to keep a gues
 agent from opening anything else there. Any page under an allowed prefix can
 still be opened, with whatever query string the guest puts in the URL.
 
-Clicking a link in a Claude Code or pi session goes through the same verb:
+Clicking a link in a Claude Code session goes through the same verb:
 `guest/xdg-open` is on the guest `PATH`, and `$BROWSER` points at it whenever the
 bridge is on for the session, so a PR link opens on the Mac. A URL outside
 `browse.allow` fails: Claude Code then shows its usual "Couldn't open your
-browser" message and pi shows nothing. Run `xdg-open <url>` in `ccxs` to see the
+browser" message. Run `xdg-open <url>` in `ccxs` to see the
 shim's reason. With `$BROWSER` set, Claude Code also opens some URLs without a
 click (an MCP server's OAuth authorize page, `/upgrade`), so narrow the prefixes
 to what you want opened. The loopback redirect of such a login still cannot
@@ -826,7 +826,7 @@ the shim, with a token that was already in a file on the Mac.
 
 ## Lifecycle: nothing to run by hand
 
-`ccup` and `ccrun`/`pirun`/`ccsh` start the shim automatically **when the directory you
+`ccup` and `ccrun`/`ccsh` start the shim automatically **when the directory you
 launch from is inside a declared project root**, and `ccdown` stops it (with the
 proxy) once no containers remain. So the normal flow is just `ccup`.
 

@@ -1,0 +1,10 @@
+#!/bin/sh
+# Entrypoint for container Codex sessions: the Codex counterpart of cc-entry.
+#
+# Codex keeps its login and config in ~/.codex, which lives in the cc-home
+# volume, so there is nothing to sync here: it only links the workspace path
+# (see cc-workspace-link) and hands off to codex. The subscription guard and
+# cc-mcp-sync are Claude Code's and do not apply.
+set -e
+/opt/cc-tools/cc-workspace-link
+exec codex "$@"

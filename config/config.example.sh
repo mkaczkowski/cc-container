@@ -69,14 +69,12 @@
 # Named volume mounted as the container's home (/root). Only one running
 # container can hold it; a profile running beside the session needs its own.
 # CC_HOME_VOLUME=cc-home
-# 0 keeps the MCP servers (and mcp.env secrets) / the pi config out of the
-# container. Usually set in a profile, not here.
+# 0 keeps the MCP servers (and mcp.env secrets) out of the container. Usually
+# set in a profile, not here.
 # CC_MCP=1
-# CC_PI_SYNC=1
-# 1 allows only a Claude.ai subscription login: Claude Code (and pi through
-# pi-claude-bridge) refuses API keys, Console logins, Bedrock and Vertex, and pi
-# refuses to start while it sees Anthropic, AWS or Claude Code credentials (keys
-# of pi's other providers are not checked). Recycle a running session
+# 1 allows only a Claude.ai subscription login: Claude Code refuses API keys,
+# Console logins, Bedrock and Vertex, and refuses to start while it sees
+# Anthropic, AWS or Claude Code credentials. Recycle a running session
 # (cc-down && cc-up) after changing it. See README "Subscription-only mode".
 # CC_SUBSCRIPTION_ONLY=0
 

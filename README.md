@@ -1,8 +1,7 @@
 # cc-container
 
 Run Claude Code inside a Linux VM on your Mac, using
-[`apple/container`](https://github.com/apple/container). The
-[pi coding agent](#running-pi-beside-claude-code) runs in the same VM too.
+[`apple/container`](https://github.com/apple/container).
 
 ```bash
 cd ~/dev/my-project
@@ -49,10 +48,9 @@ cc-container-build         # build the image (a few minutes)
 cc-doctor                  # check prerequisites, probe guest network egress
 ```
 
-First run only: `/login` inside the container, once per agent (`ccrun` for
-Claude Code, `pirun` for pi). Credentials land in the `cc-home` volume, so later
-runs start authenticated. Optional features (pi config, the Xcode bridge, your
-own image layer) need files `install.sh` does not create; see
+First run only: `/login` inside the container (`ccrun`). Credentials land in
+the `cc-home` volume, so later runs start authenticated. Optional features (the
+Xcode bridge, your own image layer) need files `install.sh` does not create; see
 [Configuration](#configuration).
 
 ## Usage
@@ -61,16 +59,16 @@ own image layer) need files `install.sh` does not create; see
 |---|---|---|
 | `cc-up` | `ccup` | Start the shared container, mounting `$PWD` |
 | `cc-attach` | `ccx` | Attach a Claude Code session (one per terminal) |
-| `pi-attach` | `pix` | Attach a [pi](#running-pi-beside-claude-code) session instead |
 | `cc-attach-shell` | `ccxs` | Bash prompt in the shared container |
 | `cc-status` | `ccst` | Runtime, proxy, shim, and container state |
-| `cc-reap` | | End attached sessions whose terminal on the Mac is gone (`ccx`, `pix` and `ccup` run it too) |
+| `cc-reap` | | End attached sessions whose terminal on the Mac is gone (`ccx` and `ccup` run it too) |
 | `cc-exec` | | Run one command (argv, not a shell string) in the shared container, from a script |
 | `cc-profile` | | Run a verb against a [profile](#profiles-a-second-isolated-container): `cc-profile <name> up` |
 | `cc-down` | `ccdown` | Stop and remove the shared container, then trim its home volume |
 | `cc-trim` | — | Give a home volume's freed space back to the Mac (`cc-trim [volume]`) |
+| `codex-attach` | `cxx` | Attach a [Codex](#running-codex) session in the shared container |
 | `cc-container` | `ccrun` | One-off throwaway session (`--rm`) |
-| `pi-container` | `pirun` | One-off throwaway pi session (`--rm`) |
+| `codex-container` | `cxrun` | One-off throwaway Codex session |
 | `cc-shell` | `ccsh` | One-off throwaway bash shell |
 | `cc-doctor` | — | Check every prerequisite; record the egress verdict |
 | `cc-sim-up` | — | Start the Xcode/simctl bridge by hand (`ccup` does it for you) |
@@ -78,11 +76,11 @@ own image layer) need files `install.sh` does not create; see
 | `cc-sim-log` | — | Its log (`-f` to follow) |
 | `cc-update` | `ccupd` | Pull the repo and apply what the pull cannot |
 | `cc-container-upgrade` | — | Upgrade Claude Code in the image |
-| `pi-container-upgrade` | | Upgrade pi in the image |
-| `cc-container-build` | — | Rebuild the image |
+| `codex-container-upgrade` | | Upgrade Codex in the image |
+| `cc-container-build` | | Rebuild the image (`cc-container-build [claude-version [codex-version]]`) |
 
 Every command forwards its arguments verbatim: `ccx`/`ccrun` to `claude`,
-`pix`/`pirun` to `pi`, `ccxs`/`ccsh` to `bash`. Quoting and spaces are preserved.
+`ccxs`/`ccsh` to `bash`. Quoting and spaces are preserved.
 
 ```bash
 ccx -c                               # resume that terminal's last conversation
@@ -91,18 +89,47 @@ ccx mcp list                         # subcommands work
 ccxs -c 'npm test'                   # bash, not claude
 ```
 
+### Running Codex
+
+The image also ships OpenAI's [Codex CLI](https://learn.chatgpt.com/docs/codex/cli).
+It runs in the same VM and shares the `cc-home` volume, so its login and config
+live in `~/.codex` in the guest.
+
+```bash
+cxrun login --device-auth    # once: prints a URL and a code to enter on any device
+cxx                          # attach Codex to the shared container (cc-up first)
+cxrun exec "summarize this repo"
+cc-profile <name> codex      # in a profile
+```
+
+Use `--device-auth`: the default browser login redirects to a port inside the
+container that your Mac's browser cannot reach. A `codex login --with-api-key`
+login works too. Both land in `~/.codex/auth.json` in the volume.
+
+`cxx` and `cxrun` pass `--dangerously-bypass-approvals-and-sandbox` for the
+interactive UI and for `exec`, `resume` and `fork`, so Codex neither asks nor
+applies its own sandbox: the VM is the boundary here, as with
+`CC_SKIP_PERMISSIONS`, which also turns this off (`CC_SKIP_PERMISSIONS=0 cxx`).
+Other subcommands (`login`, `mcp`, `review`, ...) get no flag, and so does a
+command that already passes `--sandbox`, `--ask-for-approval`, `--full-auto`
+or `--yolo`.
+
+Codex is separate from the Claude Code wiring: `mcp-servers.json` is not synced
+into it (use `codex mcp add`, stored in `~/.codex/config.toml`), and
+`CC_SUBSCRIPTION_ONLY` does not apply to it.
+
 ### The Mac stays awake while a session runs
 
-Every session command (`ccx`, `pix`, `ccxs`, `ccrun`, `pirun`, `ccsh`) runs
+Every session command (`ccx`, `ccxs`, `ccrun`, `ccsh`) runs
 under `caffeinate -i`, so idle sleep cannot suspend the VM in the middle of an
 unattended agent run. The Mac sleeps as usual once the session ends. A closed
 lid still sleeps the Mac unless it is on power with an external display.
 
 The session ends with its terminal, though not at once: closing the Mac side
 of `container exec` does not hang up the guest, so the agent keeps running
-until the next `ccx`, `pix` or `ccup`, which ends every attached session whose
+until the next `ccx` or `ccup`, which ends every attached session whose
 terminal is gone (`cc-reap` does it on demand). For a run you want to leave and come
-back to, start `pix`/`ccx` inside tmux on the Mac and detach. For a long
+back to, start `ccx` inside tmux on the Mac and detach. For a long
 command, the image has tmux too: `ccxs`, then
 `tmux new -s <name> '<command>; exec bash'`, detach with `Ctrl-b d`, and
 `tmux attach -t <name>` from another `ccxs` later. It lives in the shared
@@ -152,9 +179,9 @@ real work reclaimed 13 GB when torn down. Expect the container runtime's storage
 to grow steadily, and `ccdown` when you are finished rather than leaving a
 session up indefinitely.
 
-**`ccrun`, `pirun` and `ccsh` do not work while a shared session is up**, for
+**`ccrun` and `ccsh` do not work while a shared session is up**, for
 the same reason: they want the `cc-home` volume the session is holding, and fail
-with `storage device attachment is invalid`. Use `ccx` / `pix` / `ccxs` instead,
+with `storage device attachment is invalid`. Use `ccx` / `ccxs` instead,
 or `ccdown` first.
 
 Switching projects means recycling: `ccdown && cd <other> && ccup`.
@@ -385,68 +412,10 @@ fetch.
 Worktrees also add to the disk figure above, and unlike container state they land
 on **host** disk through the bind mount, so `ccdown` does not reclaim them.
 
-## Running pi beside Claude Code
-
-The image also ships the [pi coding agent](https://pi.dev)
-(`@earendil-works/pi-coding-agent`), and every mode above works for it with a
-`pi` name in place of `cc`:
-
-```bash
-ccup                 # the same shared container
-pix                  # pi in this terminal
-ccx                  # Claude Code in the next one, against the same checkout
-pirun -p "summarize this repo"   # one-off, --rm
-```
-
-Both agents share one container and one `cc-home` volume, so pi's state (login,
-settings, sessions) lives in `/root/.pi/agent` beside `~/.claude`, persists
-across runs, and is entirely separate from the pi you run on the Mac. Its host
-config, packages and skills are not mounted; declare the container's global pi
-config in `~/.config/cc-container/pi/` instead (below).
-
-- **No permission flag to add.** pi never asks before a tool call, so there is
-  no counterpart of `--dangerously-skip-permissions`: the VM is its only
-  boundary, as it is for Claude Code here.
-- **Project trust is asked once.** pi asks before loading a project's `.pi/`
-  extensions, settings or MCP servers, and saves the answer by path. Each
-  project mounts at its own host path, so it asks once per project, as with
-  Claude Code's trust dialog.
-- **Logging in.** Run `/login` inside pi. The OAuth callback binds inside the
-  container where your browser cannot reach it, so paste the final redirect URL
-  back into pi when it asks. Credentials land in `/root/.pi/agent/auth.json` in
-  `cc-home`. For an API key instead, pass it in `config.sh`:
-  `CC_EXTRA_RUN_ARGS=( --env "ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}" )`.
-- **MCP servers** come from the same `mcp-servers.json` (see
-  [MCP servers](#mcp-servers)).
-- **pi packages persist.** `pix install npm:<package>` (or `pirun install ...`)
-  writes to `/root/.pi/agent` in `cc-home`, so it survives `ccdown` and `--rm`
-  like a login does. [pi-claude-bridge](https://github.com/elidickinson/pi-claude-bridge)
-  (`pix install npm:pi-claude-bridge`) fits well here: it serves Claude models
-  to pi through the container's own Claude Code and its `/login`, so pi needs
-  no separate Anthropic login. Pick them in `/model` as `claude-bridge/<model>`.
-  It breaks if `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN` or
-  `ANTHROPIC_BASE_URL` is exported in the container, so do not use the API-key
-  setting above together with it.
-- **Global pi config.** `~/.config/cc-container/pi/` is mounted read-only at
-  `/opt/cc-pi` and merged into `/root/.pi/agent` by `guest/pi-config-sync` at
-  every `pix` and `pirun`, the same way `mcp-servers.json` is. Each top-level key
-  of its `settings.json` overwrites the guest's; `packages` is merged with
-  anything installed by hand (a declared package replaces a hand-installed one of
-  the same name). `keybindings.json` is symlinked, and `extensions/`,
-  `prompts/` and `skills/` are referenced as `/opt/cc-pi/...` from
-  `settings.json` (for example `"skills": ["/opt/cc-pi/skills"]`). A new
-  directory needs `ccdown && ccup` to be mounted.
-- **Worktrees** are Claude Code's feature; pi has no `--worktree`. Two pi
-  sessions in one checkout share files, so isolate them by creating a worktree
-  in `ccxs` and starting pi in it with `pix -C <worktree path relative to the
-  project>`.
-- **`mac-sim`** is a plain command on the guest `PATH`, so pi can call it like
-  any other tool.
-
 ## Profiles: a second, isolated container
 
 The shared session carries everything `config.sh` gives it: your extra mounts,
-the MCP servers and their `mcp.env` secrets, the pi config, the mac-sim token,
+the MCP servers and their `mcp.env` secrets, the mac-sim token,
 and the `cc-home` login. A long-lived job that should see none of that (a
 benchmark runner, a nightly build) gets a **profile**: a second container,
 beside the session, with its own name, home volume, image, mounts and size.
@@ -461,7 +430,7 @@ cc-profile worker status
 cc-profile worker down            # the shared session keeps running
 ```
 
-Verbs: `up`, `down`, `status`, `attach`, `pi`, `shell`, `exec`, `run` (one-off,
+Verbs: `up`, `down`, `status`, `attach`, `shell`, `exec`, `run` (one-off,
 `--rm`), `build`, `upgrade`, `doctor`. Give a profile you use often a short name
 in `config.sh`: `ccworker() { cc-profile worker "$@"; }`.
 
@@ -479,8 +448,8 @@ How it works:
   it explicitly with `container volume create -s <size> <name>` for another
   size). It needs its own login (`cc-profile <name> attach`, then `/login`, or
   a `claude setup-token` token you pass in).
-- `CC_MCP=0`, `CC_PI_SYNC=0` and `CC_SIM_AUTO=0` keep the MCP servers and their
-  secrets, the pi config and the mac-sim token out of it.
+- `CC_MCP=0` and `CC_SIM_AUTO=0` keep the MCP servers and their secrets and the
+  mac-sim token out of it.
 - **Its own image**, if it needs other tools: set `CC_CONTAINER_IMAGE` to a
   different image *name* (`claude-code-worker:local`, not `claude-code:worker`,
   so the two builds never share a `:base` tag) and `CC_IMAGE_OVERLAY` to its
@@ -499,7 +468,7 @@ widens that container's boundary; read [SECURITY.md](SECURITY.md) first.
 A task runner that starts several unattended Claude Code sessions and checks
 their work on the simulator wants the isolation above, but it also needs the
 mac-sim bridge, and it must never bill an API key. `config/profile.runner.example.sh`
-is that profile: subscription-only, no extra mounts, MCP servers or pi config,
+is that profile: subscription-only, no extra mounts or MCP servers,
 `CC_SIM_AUTO=1`, and sized for about four sessions.
 
 ```bash
@@ -540,18 +509,6 @@ nothing. The profile's `CC_STARTUP_COMMAND` removes any engine whose
 `package.json` or entry point is empty at every `up` and says so; the launcher
 fetches it again on first use (it needs the network then).
 
-To run the train's task sessions on pi with OpenRouter models
-(`trainyard run --harness pi --pi-billing openrouter`), put
-`OPENROUTER_API_KEY=...` in `mcp.env` and name it in the profile's
-`_train_env_keys`, then `cc-profile train down && cc-profile train up`. Map
-trainyard's model aliases in the container's
-`/root/.config/trainyard/machine.json` (`"pi": {"models": {"opus": ...,
-"sonnet": ..., "haiku": ...}}`, each an `openrouter/<vendor>/<model>` id). Install
-pi-subagents into `train-home` too (the profile says where): the train's
-skills start subagents through it, and trainyard refuses a pi train without it. Keep the Claude.ai login:
-landings and `land auto` still run on Claude Code. The key passes
-subscription-only mode by design, so give it a credit limit (`SECURITY.md`).
-
 ## Configuration
 
 Everything user-specific lives outside the repo, mostly in
@@ -561,10 +518,9 @@ the files every setup needs. The rest are opt-in, and you create them yourself.
 | Path in `~/.config/cc-container/` | Created by `install.sh` | Purpose |
 |---|---|---|
 | `config.sh` | yes | Image, resources, proxy mode, extra mounts, defaults |
-| `mcp/mcp-servers.json` | yes | Declarative MCP servers, synced into both agents' user scope ([MCP servers](#mcp-servers)) |
+| `mcp/mcp-servers.json` | yes | Declarative MCP servers, synced into Claude Code's user scope ([MCP servers](#mcp-servers)) |
 | `mcp.env` | yes | Secrets the above references as `${VAR}` (chmod 600, never inline) |
 | `tinyproxy.conf` | yes | Only used where guests have no direct egress |
-| `pi/` | no | Global pi config ([Running pi](#running-pi-beside-claude-code)); mounted only if it exists when a container starts |
 | `mac-sim.json` | no | The opt-in Xcode (and Android emulator) bridge, from `config/mac-sim.example.json` ([Driving the Mac's Xcode toolchain](#driving-the-macs-xcode-toolchain-from-the-guest)) |
 | `Dockerfile.local` | no | Your own layer on top of the image ([Adding tools](#adding-tools-to-the-image)) |
 | `profiles/<name>.sh` | no | A second container's settings, from `config/profile.example.sh`, `config/profile.runner.example.sh` or `config/profile.train.example.sh` ([Profiles](#profiles-a-second-isolated-container)) |
@@ -582,8 +538,8 @@ Outside it:
   token and log, and the private `TMPDIR`s of mac-sim commands that declare
   `private_tmp`. Each profile records its image versions in its own
   `image-versions.<name>`. Nothing to set up.
-- **The `cc-home` volume** is the container's home directory: both agents'
-  logins, pi packages installed with `pix install`, the container's own Claude
+- **The `cc-home` volume** is the container's home directory: the
+  login, the container's own Claude
   Code settings (such as the [statusline](#statusline)), trust decisions, and
   the terminfo entries `ccxs` and `ccsh` copy from the Mac (`~/.terminfo`). It
   survives `ccdown` and rebuilds. Deleting it (`container volume delete
@@ -647,7 +603,7 @@ a wrong path. Brace the name: `"${DIR}:${DIR}:ro"`.
 
 Set `CC_SUBSCRIPTION_ONLY=1` in `config.sh` to make sure every session bills a
 Claude.ai subscription and nothing else: no API key, Console account, Bedrock or
-Vertex, for Claude Code and for pi alike. Recycle a running session afterwards
+Vertex. Recycle a running session afterwards
 (`ccdown && ccup`); attaching to one started without it is refused.
 
 - **Claude Code enforces it itself.** `policy/subscription-only/` is mounted
@@ -655,20 +611,12 @@ Vertex, for Claude Code and for pi alike. Recycle a running session afterwards
   "claudeai"` rejects API keys and Console logins, and `allowedProviders:
   ["anthropic"]` rejects Bedrock and Vertex, whether they come from env or from a
   `settings.json` `env` block. The mount is read-only, so root in the guest
-  cannot edit it. pi-claude-bridge runs its turns through this Claude Code, so it
-  is covered too.
-- **pi is checked at every start.** Its own providers are outside Claude Code's
-  policy, so `guest/cc-subscription-guard` refuses to start pi (or Claude Code)
-  while `ANTHROPIC_*`, `AWS_*` or `CLAUDE_CODE_USE_*` is exported, `~/.aws`
-  exists, or pi's `auth.json` holds anything but an OAuth login. The error names
-  each problem and how to clear it.
-- **pi's other providers are not refused.** Their env keys
-  (`OPENROUTER_API_KEY`, `OPENAI_API_KEY` and the like) pass the check, so a
-  profile can pass one in on purpose, as the train profile can for
-  trainyard's openrouter billing. Nothing passes one unless you add it.
+  cannot edit it.
+- **The start is checked too.** `guest/cc-subscription-guard` refuses to start
+  Claude Code while `ANTHROPIC_*`, `AWS_*` or `CLAUDE_CODE_USE_*` is exported or
+  `~/.aws` exists. The error names each problem and how to clear it.
 
-Check which account is in use with `claude auth status` (from pi:
-`!claude auth status`): a subscription shows `"authMethod": "claude.ai"` and a
+Check which account is in use with `claude auth status`: a subscription shows `"authMethod": "claude.ai"` and a
 `subscriptionType`. The policy takes `/etc/claude-code`, so it cannot be combined
 with mounting your host's managed settings there; copy any keys you need from
 that file into `policy/subscription-only/managed-settings.json` instead.
@@ -680,8 +628,7 @@ The container keeps its own MCP list, separate from the host's.
 into the guest's **user scope** at every session start, so `claude mcp list` and
 `/mcp` behave exactly as after `claude mcp add --scope user`. A project's
 `.mcp.json` still applies on top, and servers you add by hand in the guest are
-never touched. The same list is merged into pi's `~/.pi/agent/mcp.json` (same
-`mcpServers` format), so `pi mcp list` and pi's `/mcp` see it too.
+never touched.
 
 Add one by editing `mcp-servers.json`, putting any secret in `mcp.env` as
 `KEY=VALUE` and referencing it as `${KEY}`, then restarting
@@ -697,15 +644,13 @@ rejects it).
 **Where the secrets end up.** `mcp.env` keeps keys out of a JSON file you might
 commit or share, but the sync substitutes each `${VAR}` into the guest's
 `~/.claude.json` so that `claude mcp list` and `/mcp` work — which means the
-resolved key persists in the `cc-home` volume until you delete it. The same goes
-for pi's `~/.pi/agent/mcp.json`. Treat that volume as holding credentials, and
-note that `claude mcp list` and `pi mcp list` both print keys in full.
+resolved key persists in the `cc-home` volume until you delete it. Treat that
+volume as holding credentials, and note that `claude mcp list` prints keys in
+full.
 
 **Only stdio and API-key servers work.** Servers authenticating by OAuth loopback
 cannot complete login: the redirect binds a port *inside* the container that your
-host browser cannot reach. Add those on the host instead. pi is the exception:
-its sign-in (`/mcp login <server>`) accepts the final redirect URL pasted back
-in, as its own `/login` does, so OAuth servers can work there.
+host browser cannot reach. Add those on the host instead.
 
 ## Statusline
 
@@ -884,17 +829,19 @@ The cost is that you now store two images, `<name>:base` and `<name>:local`.
 Delete the base with `container image delete claude-code:base` if you need the
 space; the next `cc-container-build` recreates it.
 
-## Upgrading Claude Code
+## Upgrading Claude Code and Codex
 
 ```bash
 cc-container-upgrade            # latest published version
 cc-container-upgrade 2.1.225    # a specific one
 cc-shell -c 'claude --version'  # confirm
+codex-container-upgrade         # the same for Codex (optionally a version)
+cc-shell -c 'codex --version'
 ```
 
 A plain `cc-container-build` does **not** upgrade: the `npm install` sits in a
 cached layer and replays the old version. `cc-container-upgrade` resolves the
-latest version first and passes it as `--build-arg CC_VERSION=<v>`, which changes
+latest version first and passes it as `--build-arg CC_VERSION=<v>` (`CODEX_VERSION` for Codex), which changes
 that layer's cache key and forces a real reinstall while leaving the apt layers
 cached (seconds, not a full rebuild).
 
@@ -903,20 +850,11 @@ Do not upgrade in place inside a running container. `npm install -g` in a
 the old version. Claude Code's own `claude update` is pointless here for the same
 reason. **The image is the source of truth.**
 
-pi works the same way, through `PI_VERSION`:
-
-```bash
-pi-container-upgrade            # latest published version
-pi-container-upgrade 1.2.0      # a specific one
-```
-
-Each build records the versions it used in
-`~/.local/state/cc-container/image-versions`, and any version you do not pass
-reuses that record. Upgrading one agent therefore leaves the other where it
-was, and a plain `cc-container-build` stays cached. `cc-container-build latest
-latest` returns both to unpinned. pi's in-app update check is off in the image
-(`PI_SKIP_VERSION_CHECK=1`), since an in-session `pi update` would be thrown
-away like `claude update`. `cc-doctor` shows both versions in the image.
+Each build records the version it used in
+`~/.local/state/cc-container/image-versions`, and an empty version argument
+reuses that record, so a plain `cc-container-build` stays cached.
+`cc-container-build latest` returns Claude Code to unpinned, and a second
+argument pins Codex the same way (`cc-container-build "" 0.50.0`).
 
 ## Design notes
 

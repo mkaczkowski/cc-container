@@ -120,18 +120,19 @@ direct egress.
   So do MCP API keys: `mcp.env` values are substituted into the guest's
   `~/.claude.json`, so they live in that volume in plaintext, and
   `claude mcp list` prints them in full. `mcp.env` keeps them out of a file you
-  might commit — it does not keep them out of the container.
-  pi is no different: its `/login` writes `/root/.pi/agent/auth.json`, and the
-  same MCP keys are written into `/root/.pi/agent/mcp.json`, both in `cc-home`.
+  might commit — it does not keep them out of the container. Codex's login
+  (`codex login --device-auth`) is the same: `~/.codex/auth.json` lands in that
+  volume in plaintext, and `CC_SUBSCRIPTION_ONLY` does not cover Codex.
+  Codex runs with its own sandbox and approvals off by default (the VM is the
+  boundary), exactly as Claude Code does with `--dangerously-skip-permissions`.
 - **Billing is not restricted by default.** Whatever credentials you pass in
-  are used. `CC_SUBSCRIPTION_ONLY=1` limits both agents to a Claude.ai
-  subscription (see README "Subscription-only mode"). It checks pi only when a
-  session starts, so an agent that exports a key and runs pi from a shell
-  mid-session is not caught; Claude Code's managed policy holds throughout. It
-  does not refuse the keys of pi's other providers (`OPENROUTER_API_KEY` and
-  the like): one passed in, e.g. for a trainyard train on OpenRouter, is
-  readable by every unattended agent in the VM and shows in `container
-  inspect`, and egress is unrestricted. Give such a key a credit limit.
+  are used. `CC_SUBSCRIPTION_ONLY=1` limits Claude Code to a Claude.ai
+  subscription (see README "Subscription-only mode"). The start-time check
+  cannot catch an agent that exports a key mid-session; Claude Code's managed
+  policy holds throughout. Any other key you pass in (for example through
+  `CC_EXTRA_RUN_ARGS`) is readable by every unattended agent in the VM and
+  shows in `container inspect`, and egress is unrestricted. Give such a key a
+  credit limit.
 - **Sessions share a filesystem.** In multi-session mode two agents editing the
   same file will overwrite each other. That is a correctness property, not a
   security one, but it surprises people.

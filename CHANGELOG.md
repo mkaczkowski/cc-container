@@ -11,13 +11,40 @@
   older release left running) and the last `cc-down` removes it. `cc-status`
   and `cc-doctor` now say when the proxy is required but down.
 
+- **Codex CLI in the image.** `@openai/codex` is installed beside Claude Code
+  (`CODEX_VERSION` build argument). New commands: `codex-attach`/`cxx` (shared
+  session), `codex-container`/`cxrun` (one-off), `codex-container-upgrade`, the
+  `codex` verb of `cc-profile`, and `guest/codex-entry`. `cc-container-build`
+  takes an optional second argument, the Codex version, recorded with the
+  Claude Code one; `cc-doctor` reports it. Log in once with
+  `cxrun login --device-auth` (the browser flow cannot reach the container).
+  The wrapper passes `--dangerously-bypass-approvals-and-sandbox` for the TUI,
+  `exec`, `resume` and `fork`, under `CC_SKIP_PERMISSIONS`. MCP sync and
+  `CC_SUBSCRIPTION_ONLY` stay Claude Code only. Rebuild with
+  `cc-container-build`, then `ccdown && ccup`.
+
+- **Removed pi support.** The image no longer ships the pi coding agent, and
+  these are gone: `pix`/`pi-attach`, `pirun`/`pi-container`,
+  `pi-container-upgrade`, the `pi` verb of `cc-profile`, `CC_PI_SYNC`,
+  `CC_PI_DIR`, `~/.config/cc-container/pi/`, `guest/pi-entry`,
+  `guest/pi-config-sync` and the `PI_VERSION` build argument.
+  `cc-container-build` no longer accepts pi's version as its second argument
+  (that slot is now Codex's, below). `cc-mcp-sync` writes only `~/.claude.json`,
+  `cc-subscription-guard` no longer inspects pi's `auth.json`, and `cc-doctor`
+  no longer reports a pi version. `fd-find`, which was added for pi, is no
+  longer in the image. Rebuild with `cc-container-build`, then `ccdown &&
+  ccup`. The `cc-home` volume keeps its old pi state (`~/.pi`, which includes
+  MCP keys in `~/.pi/agent/mcp.json`); remove it with
+  `ccxs -c 'rm -rf ~/.pi ~/.cc-pi-managed.json ~/.cc-mcp-managed-pi.json'`. A
+  profile that sets `CC_PI_SYNC=0` can drop the line; the setting is ignored.
+
 - **Clicking a link in a container session opens it in the Mac's browser.**
   The guest has no browser, so a click ended in "Couldn't open your browser".
   `guest/xdg-open` now forwards the URL to `mac-sim browse`, and the wrapper
   sets `BROWSER` to it along with the other mac-sim bridge env. Only the https
   prefixes in `browse.allow` open (GitHub and Notion by default). Any other
   URL, and loopback URLs such as a login helper's `http://127.0.0.1:<port>`,
-  still fail: Claude Code shows its usual message and pi shows nothing, so run
+  still fail: Claude Code shows its usual message, so run
   `xdg-open <url>` in `ccxs` to see the reason. Needs mac-sim configured
   (`mac-sim.json`) and the session started inside a declared project root; a
   running shared session picks it up after `ccdown && ccup`.
@@ -26,7 +53,7 @@
   whether to emit clickable links from `TERM_PROGRAM` (Ghostty, iTerm2,
   WezTerm, VS Code, ...), `LC_TERMINAL` or a kitty `TERM`, and the wrapper
   forwarded only `TERM`, which says nothing for `xterm-ghostty`. `ccrun`,
-  `ccx`, `pix`, `pirun`, `ccxs` and `cc-exec` now also forward
+  `ccx`, `ccxs` and `cc-exec` now also forward
   `TERM_PROGRAM`, `TERM_PROGRAM_VERSION`, `LC_TERMINAL` and
   `LC_TERMINAL_VERSION` when the Mac sets them.
 
@@ -48,9 +75,9 @@
   its file: remove the key from `/root/.config/trainyard/machine.json`.
 - **A closed terminal no longer leaves its session running in the shared
   container.** Closing the Mac side of `container exec -it` does not hang up
-  the guest, so every `ccx`/`pix` whose terminal was closed kept running until
-  `ccdown` (one train container held 23 of them, about 6.5 GB). `ccx` and
-  `pix` now tag their session with `CC_ATTACH_ID`, and `ccx`, `pix` and `ccup`
+  the guest, so every `ccx` whose terminal was closed kept running until
+  `ccdown` (one train container held 23 of them, about 6.5 GB). `ccx` now
+  tags its session with `CC_ATTACH_ID`, and `ccx` and `ccup`
   first end every tagged session whose `container exec` client is gone
   (`cc-reap` runs it on demand, `guest/cc-reap` does the work). Untagged
   processes, such as a train's console and sessions, are never touched.
@@ -77,13 +104,6 @@
   bill AWS Bedrock on the Mac) is skipped, with a line saying so, and left out
   of the container's `machine.json`: its run directories and diffs never
   reach a subscription session. An unreadable `project.json` stops `up`.
-- **The train profile documents pi task sessions on OpenRouter.** trainyard's
-  `--pi-billing openrouter` needs `OPENROUTER_API_KEY` in the container:
-  `config/profile.train.example.sh` shows passing it through
-  `_train_env_keys` and installing pi-subagents with the launcher. The
-  subscription-only docs now say what the guard always did: it refuses
-  Anthropic, AWS and Claude Code credentials, not the keys of pi's other
-  providers.
 - **The train profile's container follows trainyard's main.** The
   `machine.json` that `profile.train.example.sh` writes into a new home volume
   now sets `engine.follow` to the mounted trainyard checkout, as the Mac's

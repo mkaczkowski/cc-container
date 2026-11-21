@@ -65,7 +65,7 @@ already run on the port is used as is.
 
 Anything that hard-codes a direct connection and ignores `http_proxy` /
 `https_proxy` will fail. `curl`, `wget`, `git`, `npm`, `yarn`, `pnpm`, `gh`,
-Claude Code and pi all honour it.
+and Claude Code all honour it.
 
 **Node's built-in `fetch`, `http` and `https` do not** on their own, so the
 container also sets `NODE_USE_ENV_PROXY=1` (Node 22.21+), plus
